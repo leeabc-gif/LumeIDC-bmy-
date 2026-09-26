@@ -35,6 +35,16 @@ const (
 	defRefundOnFailure = "1"
 )
 
+// defStuckAfter 异步操作"卡死"阈值：started_at 距今超过此值的 pending 操作，
+// ListPending 会主动丢弃，pollOne 也会把它标 failed 并退款（防止资金长期悬挂）。
+// 同时 adminRetryOperation 用同一阈值判断"是否需要 resurrect"（started_at 复位）。
+// 该常量与 SQL 里的 `interval '15 minutes'` 同源；改这里请同步 repo.go:ListPending。
+const defStuckAfter = 15 * time.Minute
+
+// alertCategorySpaceshipPoll 管理员告警分类（NotifyAdminOnce 的 category 字段），
+// 同类告警会在告警聚合面板归到一起。
+const alertCategorySpaceshipPoll = "spaceship-poll"
+
 func init() {
 	plugin.Register(&Plugin{})
 }
@@ -291,10 +301,12 @@ func (p *Plugin) pollOne(ctx context.Context, c *Client, op *OperationRow) error
 			}
 			_ = p.repo.UpdateDomain(ctx, op.DomainID.Int64, patch)
 		}
-		// 通知
+		// 终态告警走 NotifyAdminOnce：alertKey 含 operationID，同一笔操作多次轮询
+		// 只发一次；不同操作各自一次；管理员聚合面板按 alertCategorySpaceshipPoll 归类。
 		if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
-			_ = p.host.Notify.Notify(ctx, 0, "域名注册成功",
-				fmt.Sprintf("域名 %s 已成功注册（操作 %s）", op.Domain, op.OperationID))
+			alertKey := fmt.Sprintf("spaceship.poll.success:%s:%s", op.OpType, op.OperationID)
+			body := fmt.Sprintf("域名 %s 已成功注册（操作 %s）", op.Domain, op.OperationID)
+			_ = p.host.Notify.NotifyAdminOnce(ctx, alertKey, alertCategorySpaceshipPoll, "域名注册成功", body)
 		}
 	case "failed":
 		errMsg := o.Error
@@ -317,7 +329,7 @@ func (p *Plugin) pollOne(ctx context.Context, c *Client, op *OperationRow) error
 			p.refundByDomainOperation(ctx, op)
 			refunded = true
 		}
-		// 通知管理员
+		// 失败告警必须能让管理员当天就看到（避免"钱已退用户不知道"），按 operationID 去重。
 		if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
 			what := "域名注册失败"
 			if op.OpType == "domain_renew" {
@@ -327,16 +339,23 @@ func (p *Plugin) pollOne(ctx context.Context, c *Client, op *OperationRow) error
 			if !refunded {
 				tail = "未自动退款（refundOnFailure 已关闭，需人工处理）"
 			}
-			_ = p.host.Notify.Notify(ctx, 0, what,
+			alertKey := fmt.Sprintf("spaceship.poll.failed:%s:%s", op.OpType, op.OperationID)
+			_ = p.host.Notify.NotifyAdminOnce(ctx, alertKey, alertCategorySpaceshipPoll, what,
 				fmt.Sprintf("域名 %s %s：%s（操作 %s，%s）", op.Domain, what, errMsg, op.OperationID, tail))
 		}
 	case "pending":
-		// 超过 15 分钟仍 pending → 标记 failed 并退款（防止资金长期悬挂）。
+		// 超过 defStuckAfter 仍 pending → 标记 failed 并退款（防止资金长期悬挂）。
 		// 与 failed 分支同规则：钱先退回用户，管理员再对账上游是否真的注册成功。
-		if time.Since(op.StartedAt) > 15*time.Minute {
+		if time.Since(op.StartedAt) > defStuckAfter {
 			_ = p.repo.MarkFailed(ctx, op.ID, "轮询超时（>15min），需管理员对账", nil)
 			if p.cfgBool(ctx, "refundOnFailure", true) {
 				p.refundByDomainOperation(ctx, op)
+			}
+			if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
+				alertKey := fmt.Sprintf("spaceship.poll.timeout:%s:%s", op.OpType, op.OperationID)
+				body := fmt.Sprintf("域名 %s 异步操作超过 %v 仍 pending，已按失败处理（操作 %s）",
+					op.Domain, defStuckAfter, op.OperationID)
+				_ = p.host.Notify.NotifyAdminOnce(ctx, alertKey, alertCategorySpaceshipPoll, "异步操作超时", body)
 			}
 		}
 	}
@@ -344,9 +363,6 @@ func (p *Plugin) pollOne(ctx context.Context, c *Client, op *OperationRow) error
 }
 
 // ---- 纯函数（供 handler + 单测复用） ----
-
-// parseContact 从 JSON body 解析 ContactRow（不含 contactId，用于 SaveContact upsert）。
-func parseContact(name any) *ContactRow { return nil } // 占位，handler 层直接写
 
 // yearsOK 注册年限范围校验（全局兜底，具体后缀以价目表 min_years/max_years 为准）。
 func yearsOK(n int) bool { return n >= 1 && n <= 10 }

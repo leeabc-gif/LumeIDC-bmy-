@@ -744,7 +744,7 @@ func (p *Plugin) adminRetryOperation(w http.ResponseWriter, r *http.Request) {
 	resurrected := false
 	if op.Status == "pending" {
 		if ok, err := p.repo.MarkPendingRetried(r.Context(), op.ID); err == nil && ok &&
-			time.Since(op.StartedAt) > 15*time.Minute {
+			time.Since(op.StartedAt) > defStuckAfter {
 			resurrected = true
 		}
 	}

@@ -83,8 +83,19 @@ func (f *refundProbeRepo) LatestPaidOrder(ctx context.Context, domainID int64, k
 	return nil, nil
 }
 
-// fakeNotify 记录站内通知（验证 enableNotify 开启时成功/失败均通知）。
-type fakeNotify struct{ calls []string }
+// fakeNotify 记录站内通知与管理员告警，便于断言"告警是否被去重/分类"。
+// alerts 每条为 (alertKey, subject)；calls 仍记录普通 Notify 以兼容老用例。
+type fakeNotify struct {
+	calls  []string
+	alerts []alertRecord
+}
+
+type alertRecord struct {
+	alertKey string
+	category string
+	subject  string
+	body     string
+}
 
 func (n *fakeNotify) NotifyTemplate(ctx context.Context, userID int64, code, title, body string, values ...map[string]string) error {
 	return nil
@@ -94,6 +105,7 @@ func (n *fakeNotify) Notify(ctx context.Context, userID int64, title, body strin
 	return nil
 }
 func (n *fakeNotify) NotifyAdminOnce(ctx context.Context, alertKey, category, subject, body string) error {
+	n.alerts = append(n.alerts, alertRecord{alertKey: alertKey, category: category, subject: subject, body: body})
 	return nil
 }
 
@@ -213,15 +225,25 @@ func TestPollOneSuccessDomainCreate(t *testing.T) {
 	if _, ok := patch.patches["expires_at"].(time.Time); !ok {
 		t.Fatalf("expires_at 应为 time.Time: %T", patch.patches["expires_at"])
 	}
-	if len(nt.calls) != 1 || nt.calls[0] != "域名注册成功" {
-		t.Fatalf("成功应通知管理员一次: %+v", nt.calls)
+	if len(nt.calls) != 0 {
+		t.Fatalf("成功不应再走 Notify(userID=0) 通道（应走 NotifyAdminOnce）: %+v", nt.calls)
+	}
+	if len(nt.alerts) != 1 || nt.alerts[0].subject != "域名注册成功" {
+		t.Fatalf("成功应告警一次且 subject 正确: %+v", nt.alerts)
+	}
+	if nt.alerts[0].category != "spaceship-poll" {
+		t.Fatalf("告警应归类到 spaceship-poll: %+v", nt.alerts[0])
+	}
+	if !strings.Contains(nt.alerts[0].alertKey, "op-1") {
+		t.Fatalf("alertKey 应含 operationID: %q", nt.alerts[0].alertKey)
 	}
 }
 
-// pollOne success（非 domain_create，如续费）：MarkSuccess 但不得回补域名注册信息。
+// pollOne success（非 domain_create，如续费）：MarkSuccess 但不得回补域名注册信息；
+// 告警走 NotifyAdminOnce，alertKey 用 OpType 区分以便按操作类型聚合。
 func TestPollOneSuccessNonCreate(t *testing.T) {
 	fr := &fakeRepo{}
-	p, _ := newPollPlugin(nil, fr)
+	p, nt := newPollPlugin(nil, fr)
 	c, _ := opServer(t, func(w http.ResponseWriter, r *http.Request) {
 		writeOp(w, http.StatusOK, `{"operationId":"op-r","status":"success","details":{"domainId":"sd-9"}}`)
 	})
@@ -232,6 +254,9 @@ func TestPollOneSuccessNonCreate(t *testing.T) {
 	}
 	if len(fr.markSucc) != 1 || len(fr.patches) != 0 {
 		t.Fatalf("非注册操作不得回补域名: succ=%+v patches=%+v", fr.markSucc, fr.patches)
+	}
+	if len(nt.alerts) != 1 || !strings.Contains(nt.alerts[0].alertKey, "domain_renew") {
+		t.Fatalf("续费告警应走 NotifyAdminOnce 且 alertKey 含 OpType: %+v", nt.alerts)
 	}
 }
 
@@ -266,18 +291,25 @@ func TestPollOneFailedErrMsgChain(t *testing.T) {
 			if len(fr.markSucc) != 0 || len(fr.patches) != 0 {
 				t.Fatal("failed 不得标记成功或回补域名")
 			}
-			if len(nt.calls) != 1 || nt.calls[0] != "域名注册失败" {
-				t.Fatalf("失败应通知管理员一次: %+v", nt.calls)
+			if len(nt.calls) != 0 {
+				t.Fatalf("失败不应再走 Notify(userID=0) 通道（应走 NotifyAdminOnce）: %+v", nt.calls)
+			}
+			if len(nt.alerts) != 1 || nt.alerts[0].subject != "域名注册失败" {
+				t.Fatalf("失败应告警一次且 subject 正确: %+v", nt.alerts)
+			}
+			if !strings.Contains(nt.alerts[0].alertKey, c.want) && !strings.Contains(nt.alerts[0].body, c.want) {
+				// 兜底：errMsg 可能只体现在 body 里（subject 是固定的"域名注册失败"）。
+				t.Fatalf("告警 body 应含 errMsg=%q: %+v", c.want, nt.alerts[0])
 			}
 		})
 	}
 }
 
-// pollOne pending：超 15 分钟标记"需管理员对账"；未超时不动状态（等下一轮）。
+// pollOne pending：超 defStuckAfter 标记"需管理员对账"并告警；未超时不动状态。
 func TestPollOnePendingTimeout(t *testing.T) {
 	t.Run("超时标记失败", func(t *testing.T) {
 		fr := &fakeRepo{}
-		p, _ := newPollPlugin(nil, fr)
+		p, nt := newPollPlugin(nil, fr)
 		c, _ := opServer(t, func(w http.ResponseWriter, r *http.Request) {
 			writeOp(w, http.StatusOK, `{"operationId":"op-p","status":"pending"}`)
 		})
@@ -293,10 +325,16 @@ func TestPollOnePendingTimeout(t *testing.T) {
 		if fr.markFail[0].result != nil {
 			t.Fatalf("超时标记 result 应为 nil: %+v", fr.markFail[0].result)
 		}
+		if len(nt.alerts) != 1 || nt.alerts[0].subject != "异步操作超时" {
+			t.Fatalf("超时应告警一次且 subject 正确: %+v", nt.alerts)
+		}
+		if !strings.Contains(nt.alerts[0].alertKey, "spaceship.poll.timeout") {
+			t.Fatalf("超时 alertKey 应含 spaceship.poll.timeout: %q", nt.alerts[0].alertKey)
+		}
 	})
 	t.Run("未超时不动", func(t *testing.T) {
 		fr := &fakeRepo{}
-		p, _ := newPollPlugin(nil, fr)
+		p, nt := newPollPlugin(nil, fr)
 		c, _ := opServer(t, func(w http.ResponseWriter, r *http.Request) {
 			writeOp(w, http.StatusOK, `{"operationId":"op-p","status":"pending"}`)
 		})
@@ -309,6 +347,9 @@ func TestPollOnePendingTimeout(t *testing.T) {
 		if len(fr.markFail) != 0 || len(fr.markSucc) != 0 {
 			t.Fatal("未超时 pending 不得改状态")
 		}
+		if len(nt.alerts) != 0 {
+			t.Fatalf("未超时 pending 不应告警: %+v", nt.alerts)
+		}
 	})
 }
 
@@ -317,7 +358,7 @@ func TestPollOnePendingTimeout(t *testing.T) {
 // 这里用计数断言 refundByDomainOperation 确实被调用。
 func TestPollOnePendingTimeoutRefunds(t *testing.T) {
 	fr := &refundProbeRepo{fakeRepo: &fakeRepo{}}
-	p, _ := newPollPlugin(nil, fr)
+	p, nt := newPollPlugin(nil, fr)
 	c, _ := opServer(t, func(w http.ResponseWriter, r *http.Request) {
 		writeOp(w, http.StatusOK, `{"operationId":"op-pr","status":"pending"}`)
 	})
@@ -333,10 +374,13 @@ func TestPollOnePendingTimeoutRefunds(t *testing.T) {
 	if fr.refundCalls != 1 {
 		t.Errorf("P1 资金悬挂：pending 超时未触发退款（refundCalls=%d）", fr.refundCalls)
 	}
+	if len(nt.alerts) != 1 || nt.alerts[0].subject != "异步操作超时" {
+		t.Errorf("pending 超时应同时告警管理员: %+v", nt.alerts)
+	}
 
 	// refundOnFailure 关闭时不退款（人工处理）
 	fr2 := &refundProbeRepo{fakeRepo: &fakeRepo{}}
-	p2, _ := newPollPlugin(map[string]string{"plugin.spaceship.refundOnFailure": "0"}, fr2)
+	p2, nt2 := newPollPlugin(map[string]string{"plugin.spaceship.refundOnFailure": "0"}, fr2)
 	c2, _ := opServer(t, func(w http.ResponseWriter, r *http.Request) {
 		writeOp(w, http.StatusOK, `{"operationId":"op-pr2","status":"pending"}`)
 	})
@@ -351,6 +395,10 @@ func TestPollOnePendingTimeoutRefunds(t *testing.T) {
 	}
 	if len(fr2.markFail) != 1 {
 		t.Errorf("refundOnFailure 关闭也应标记失败以便管理员对账: %+v", fr2.markFail)
+	}
+	// 关闭 refundOnFailure 仍要告警（管理员需要人工处理）
+	if len(nt2.alerts) != 1 {
+		t.Errorf("refundOnFailure 关闭后超时事件仍应告警: %+v", nt2.alerts)
 	}
 }
 
@@ -387,7 +435,7 @@ func TestPollOneUpstreamErrorPropagates(t *testing.T) {
 	}
 }
 
-// enableNotify 关闭时：状态迁移照常，但不发通知。
+// enableNotify 关闭时：状态迁移照常，但不发任何通知/告警。
 func TestPollOneNotifyDisabled(t *testing.T) {
 	fr := &fakeRepo{}
 	p, nt := newPollPlugin(map[string]string{"plugin.spaceship.enableNotify": "0"}, fr)
@@ -402,7 +450,55 @@ func TestPollOneNotifyDisabled(t *testing.T) {
 	if len(fr.markSucc) != 1 {
 		t.Fatalf("关闭通知不影响状态迁移: %+v", fr.markSucc)
 	}
-	if len(nt.calls) != 0 {
-		t.Fatalf("关闭通知后不得发送: %+v", nt.calls)
+	if len(nt.calls) != 0 || len(nt.alerts) != 0 {
+		t.Fatalf("关闭通知后不得发送任何渠道: calls=%+v alerts=%+v", nt.calls, nt.alerts)
+	}
+}
+
+// pollOne alertKey 设计意图：
+//   - 同一 operationID 多次轮询 alertKey 一致（生产侧按 alertKey 去重）；
+//   - 不同 operationID alertKey 不同（不互相覆盖）。
+// 该测试在调用层断言 alertKey 与 operationID 的对应关系；真实去重由生产实现
+// （admin_alert_log 表）保证，fakeNotify 自身不去重。
+func TestPollOneAlertKeyUniqueness(t *testing.T) {
+	fr := &fakeRepo{}
+	p, nt := newPollPlugin(nil, fr)
+	c, _ := opServer(t, func(w http.ResponseWriter, r *http.Request) {
+		writeOp(w, http.StatusOK, `{"operationId":"`+routeOpID(r)+`","status":"success","details":{"domainId":"sd-x"}}`)
+	})
+	// 同一 op 轮询两次（模拟 cron 多次抓到）
+	op1 := &OperationRow{ID: 20, OperationID: "op-A", OpType: "domain_create",
+		DomainID: sql.NullInt64{Int64: 1, Valid: true}, Domain: "a.example", Status: "pending", StartedAt: time.Now()}
+	if err := p.pollOne(context.Background(), c, op1); err != nil {
+		t.Fatalf("轮询1失败: %v", err)
+	}
+	if err := p.pollOne(context.Background(), c, op1); err != nil {
+		t.Fatalf("轮询2失败: %v", err)
+	}
+	// fakeNotify 累计 2 条（自身不去重）；关键看 alertKey 一致 → 生产侧会去重
+	if len(nt.alerts) != 2 {
+		t.Fatalf("fakeNotify 累计调用应=2: %+v", nt.alerts)
+	}
+	if nt.alerts[0].alertKey != nt.alerts[1].alertKey {
+		t.Fatalf("同一 op 两次轮询 alertKey 应相同，便于生产去重: %q vs %q",
+			nt.alerts[0].alertKey, nt.alerts[1].alertKey)
+	}
+	// 不同 op → alertKey 不同
+	op2 := &OperationRow{ID: 21, OperationID: "op-B", OpType: "domain_create",
+		DomainID: sql.NullInt64{Int64: 2, Valid: true}, Domain: "b.example", Status: "pending", StartedAt: time.Now()}
+	if err := p.pollOne(context.Background(), c, op2); err != nil {
+		t.Fatalf("轮询op-B失败: %v", err)
+	}
+	if len(nt.alerts) != 3 {
+		t.Fatalf("累计调用应=3: %+v", nt.alerts)
+	}
+	if nt.alerts[0].alertKey == nt.alerts[2].alertKey {
+		t.Fatalf("不同 op 的 alertKey 不应相同: %q", nt.alerts[0].alertKey)
+	}
+	// 三条全部归到 spaceship-poll
+	for i, a := range nt.alerts {
+		if a.category != "spaceship-poll" {
+			t.Fatalf("第 %d 条告警 category 应=spaceship-poll: %+v", i, a)
+		}
 	}
 }
