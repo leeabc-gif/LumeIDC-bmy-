@@ -18,6 +18,10 @@ func adminRequire(w http.ResponseWriter, r *http.Request) bool {
 	}
 	// 浏览器导航跳后台登录页；SPA（Accept: application/json）返回 401 JSON。
 	if wantsJSON(r) {
+		// 先设 Content-Type 再写状态码：WriteHeader 之后 header 即提交，
+		// 此时再 Set("Content-Type") 无效，Go 会按正文嗅探成 text/plain，
+		// 前端按 Content-Type 解析就会把 JSON 体当纯文本处理。
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		w.WriteHeader(http.StatusUnauthorized)
 		writeJSON(w, map[string]any{"ok": 0, "msg": "登录已过期，请重新登录"})
 		return false

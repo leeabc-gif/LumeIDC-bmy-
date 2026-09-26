@@ -69,6 +69,8 @@ func jsonStatus(w http.ResponseWriter, r *http.Request, status int, msg string) 
 		http.Error(w, msg, status)
 		return
 	}
+	// 同上：Content-Type 必须在 WriteHeader 之前设置，否则被嗅探成 text/plain。
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	writeJSON(w, map[string]any{"ok": status < 400, "msg": msg})
 }

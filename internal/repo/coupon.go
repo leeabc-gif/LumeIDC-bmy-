@@ -20,6 +20,7 @@ type Coupon struct {
 	Type       string // percent | fixed
 	Value      float64
 	MinAmount  float64
+	StartsAt   time.Time
 	ExpiresAt  *time.Time
 	UsageLimit int
 	UsedCount  int
@@ -55,7 +56,7 @@ func (c *Coupons) Validate(ctx context.Context, tx *sql.Tx, code string, userID 
 	err = tx.QueryRowContext(ctx,
 		`SELECT `+couponColumns+`
 		 FROM coupons WHERE code=$1 AND starts_at<=now() AND (user_id IS NULL OR user_id=$2) FOR UPDATE`, code, userID).
-		Scan(&cp.ID, &cp.Type, &cp.Value, &cp.MinAmount, new(time.Time), &expires, &cp.UsageLimit, &cp.UsedCount, &cp.Active, &cp.UserID, &cp.ApplyScope, &cp.Recurring, &need)
+		Scan(&cp.ID, &cp.Code, &cp.Type, &cp.Value, &cp.MinAmount, &cp.StartsAt, &expires, &cp.UsageLimit, &cp.UsedCount, &cp.Active, &cp.UserID, &cp.ApplyScope, &cp.Recurring, &need)
 	if errors.Is(err, sql.ErrNoRows) || !cp.Active {
 		return 0, "", ErrCouponInvalid
 	}

@@ -12,7 +12,7 @@
  *   node scripts/acceptance-plugins.mjs violation      # 只跑指定插件
  *   node scripts/acceptance-plugins.mjs violation refund
  * 环境变量：ACCEPT_BASE / SMOKE_EMAIL / SMOKE_PASSWORD / SMOKE_ADMIN / SMOKE_ADMIN_PASSWORD / CHROME_PATH
- * 前提：`npm run dev` 已启动（:5173），Go 后端 :8080 运行，验收库已备份。
+ * 前提：`npm run dev` 已启动（:5173，且 LUME_DEV_API 指向 Go 后端所在端口），Go 后端已运行，验收库已备份。
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -55,6 +55,15 @@ if (!CHROME) {
   console.error('未找到 Chrome/Edge，请设置 CHROME_PATH')
   process.exit(1)
 }
+
+// psql 二进制探测（DB 直证用）：PSQL_PATH 可覆盖；候选含旧环境 D:/lumeidc-dev 与本机 pgsql17；均不可用时退回 PATH 查找
+const PSQL = [
+  process.env.PSQL_PATH,
+  'D:/lumeidc-dev/pgsql/bin/psql.exe',
+  'd:/31493/Documents/开发2用/tools/pgsql17/pgsql/bin/psql.exe',
+]
+  .filter(Boolean)
+  .find((p) => fs.existsSync(p)) || 'psql'
 
 // ---------------------------------------------------------------- 结果记录
 
@@ -781,6 +790,48 @@ const PLUGINS = {
     clientWaitSelector: '.el-form',
     flow: flowDailyreport,
   },
+  spaceship: {
+    name: 'spaceship',
+    title: '域名注册',
+    adminPath: '/admin#/plugin/spaceship',
+    clientPath: '/plugin/spaceship',
+    adminRoutes: [
+      '/admin/plugin/spaceship/contacts',
+      '/admin/plugin/spaceship/domains',
+      '/admin/plugin/spaceship/operations',
+    ],
+    clientRoutes: ['/plugin/spaceship/my', '/plugin/spaceship/my/contacts'],
+    adminWriteProbe: { path: '/admin/plugin/spaceship/domains/999999999/renew', body: {} },
+    clientWriteProbe: { path: '/plugin/spaceship/register', body: { domain: '', years: 1, paidAmount: '' } },
+    piiNeedle: '@',
+    malformedCases: [
+      // 注册入口三道校验：域名格式 / 年限越界 / 归属用户缺失（QA 环境未配 API 时先行返回「未配置」，均为 ok:0）
+      { name: '注册缺域名', method: 'POST', path: '/admin/plugin/spaceship/domains/register', body: { domain: '', years: 1, contactId: 1, userId: 1, paidAmount: '1.00' } },
+      { name: '注册年限越界', method: 'POST', path: '/admin/plugin/spaceship/domains/register', body: { domain: 'qa-probe.invalid', years: 99, contactId: 1, userId: 1, paidAmount: '1.00' } },
+      { name: '注册未指定归属用户', method: 'POST', path: '/admin/plugin/spaceship/domains/register', body: { domain: 'qa-probe.invalid', years: 1, contactId: 1, paidAmount: '1.00' } },
+      { name: '联系人缺必填字段', method: 'POST', path: '/admin/plugin/spaceship/contacts', body: { firstName: 'QA' } },
+      { name: '域名 id 非数字', method: 'GET', path: '/admin/plugin/spaceship/domains/abc', body: {} },
+      { name: '自动续费不存在域名', method: 'POST', path: '/admin/plugin/spaceship/domains/999999999/autorenew', body: { enable: true } },
+      { name: '删除不存在联系人', method: 'DELETE', path: '/admin/plugin/spaceship/contacts/999999999', body: {} },
+      { name: '重试不存在操作', method: 'POST', path: '/admin/plugin/spaceship/operations/999999999/retry', body: {} },
+      { name: '操作日志注入参数', method: 'GET', path: "/admin/plugin/spaceship/operations?limit=-1&offset=' OR 1=1--", body: {} },
+      // 未配置 API 时 JSONFail「未配置」（ok:0）；已配置则走真实连通性探测，不得 500
+      { name: '测试连接', method: 'POST', path: '/admin/plugin/spaceship/client/test', body: {} },
+    ],
+    // 前台自有域名：用户B 操作他人域名，clientAutoRenew 归属校验 404（JSONFail ok:0）
+    privProbe: {
+      kind: 'existing',
+      listPath: '/admin/plugin/spaceship/domains',
+      probePath: '/plugin/spaceship/my/{id}/autorenew',
+      probeMethod: 'POST',
+      probeBody: {},
+      expect: 'notOk',
+    },
+    adminWaitText: '域名注册',
+    clientWaitText: '我的域名',
+    clientWaitSelector: '.spaceship-tabs',
+    flow: flowSpaceship,
+  },
 }
 
 // ---------------------------------------------------------------- violation 业务流
@@ -1111,6 +1162,21 @@ async function flowRefund({ adminPage, customerPage, marker }) {
   const cents = (v) => (v === null || v === undefined ? 'N/A' : (v / 100).toFixed(2))
   const toCents = (s) => Math.round(parseFloat(s) * 100)
 
+  // DB 直证/自愈：与 ticket、spaceship 流程同口径的 psql 通道。
+  const psql = (sql) => {
+    try {
+      return execSync(`"${PSQL}" -h 127.0.0.1 -p 5433 -U lumeidc -d lumeidc -t -A -c "${sql}"`,
+        { env: { ...process.env, PGPASSWORD: 'lumeidc_dev' }, encoding: 'utf8', timeout: 15000 }).trim()
+    } catch (e) {
+      return null
+    }
+  }
+  const psqlNum = (sql) => {
+    const v = psql(sql)
+    const n = v === null ? NaN : parseFloat(v)
+    return Number.isFinite(n) ? n : null
+  }
+
   // D 系列三视图检查后页面停留在移动视口（375px）；前台移动视口渲染 .refund-card 卡片而非表格行，
   // 业务流行内操作依赖桌面表格，开头统一恢复桌面视口。
   await adminPage.setViewport({ width: 1440, height: 900 })
@@ -1238,7 +1304,37 @@ async function flowRefund({ adminPage, customerPage, marker }) {
     await sleep(400)
   }
 
-  // ---- 步骤 0：幂等清理 + 基线
+  // ---- 步骤 0：QA 账本复位 + 幂等清理 + 基线
+  // 退款流程用的是固定 QA 订单 #475/#476/#477，而可退余额 = 实付 − SUM(refunds done)，
+  // 是库里累积算出来的。上一轮跑完的 approved 记录会吃掉下一轮的可退额度，导致
+  // 硬编码金额（6.00）被前端夹到剩余额度、R-11 对账随之失败——那是脚本不可重复执行，
+  // 不是产品缺陷。这里在开跑前把三个 QA 订单的退款痕迹清空并把余额冲平，
+  // 让每轮都从同一账本基线出发（自愈；psql 不可用时降级为累积口径，断言同步放宽）。
+  let resetOk = false
+  let paidBase = null // 订单 #475 实付（分），复位后即可退全额
+  {
+    const uid = psqlNum(`SELECT user_id FROM orders WHERE id=${ORDER_MAIN}`)
+    const paid = psqlNum(`SELECT amount::numeric*100 FROM orders WHERE id=${ORDER_MAIN}`)
+    if (uid !== null && paid !== null && psql('SELECT 1') !== null) {
+      // 先按本轮已入账的退款金额倒扣余额，再删账本，避免用户余额被反复虚增
+      const doneSum = psqlNum(
+        `SELECT COALESCE(SUM(amount::numeric),0)*100 FROM refunds WHERE order_id IN (${ORDER_MAIN},${ORDER_EXPIRED},${ORDER_UNPAID}) AND status='done'`)
+      if (doneSum !== null && doneSum > 0) {
+        psql(`UPDATE users SET balance = balance - ${(doneSum / 100).toFixed(2)} WHERE id=${uid}`)
+      }
+      psql(`DELETE FROM refunds WHERE order_id IN (${ORDER_MAIN},${ORDER_EXPIRED},${ORDER_UNPAID})`)
+      psql(`DELETE FROM plugin_refund_requests WHERE order_id IN (${ORDER_MAIN},${ORDER_EXPIRED},${ORDER_UNPAID})`)
+      const leftReq = psqlNum(`SELECT count(*) FROM plugin_refund_requests WHERE order_id IN (${ORDER_MAIN},${ORDER_EXPIRED},${ORDER_UNPAID})`)
+      const leftRef = psqlNum(`SELECT count(*) FROM refunds WHERE order_id IN (${ORDER_MAIN},${ORDER_EXPIRED},${ORDER_UNPAID})`)
+      resetOk = leftReq === 0 && leftRef === 0
+      if (resetOk) paidBase = Math.round(paid)
+      note('步骤0 账本复位', resetOk
+        ? `已清空 #${ORDER_MAIN}/#${ORDER_EXPIRED}/#${ORDER_UNPAID} 历史退款痕迹（倒扣余额 ${cents(doneSum)}）；#${ORDER_MAIN} 可退基线=${cents(paidBase)}`
+        : `复位未彻底：残留 申请=${leftReq} 退款=${leftRef}；后续改用实时可退余额自适应`)
+    } else {
+      note('步骤0 账本复位', 'psql 不可用，跳过复位；后续改用实时可退余额自适应')
+    }
+  }
   let swept = 0
   for (const x of await myList()) {
     if (String(x.detail || '').includes(marker) && x.status === 'pending') {
@@ -1252,6 +1348,9 @@ async function flowRefund({ adminPage, customerPage, marker }) {
 
   // ---- 步骤 1：R-01a 可退订单口径
   let eligibleReasons = []
+  // 本轮基线：订单 #475 的实时可退余额（分）。后续金额一律由它推导，
+  // 不再硬编码 10.00/6.00——账本复位成功时等于实付，复位不可用时等于剩余额度。
+  let base = null
   {
     const r = await pageApi(customerPage, 'GET', '/plugin/refund/eligible-orders')
     const orders = (r.json && r.json.orders) || []
@@ -1259,19 +1358,28 @@ async function flowRefund({ adminPage, customerPage, marker }) {
     const hit = orders.find((o) => o.id === ORDER_MAIN)
     const noExpired = !orders.some((o) => o.id === ORDER_EXPIRED)
     const refundable = hit ? parseFloat(hit.refundable) : NaN
-    const ok = !!(r.json && String(r.json.ok) === '1' && hit && noExpired && refundable > 0 && refundable <= 10)
+    base = hit && Number.isFinite(refundable) ? toCents(hit.refundable) : null
+    const ok = !!(r.json && String(r.json.ok) === '1' && hit && noExpired && refundable > 0
+      && (paidBase === null || refundable <= paidBase / 100 + 0.001))
     check('R-01a', 'P0', '可退订单口径（窗口内已支付可见、超窗隐藏）', ok,
-      `含#${ORDER_MAIN}:${hit ? `refundable=${hit.refundable}` : '缺'} 不含#${ORDER_EXPIRED}:${noExpired}`)
+      `含#${ORDER_MAIN}:${hit ? `refundable=${hit.refundable}` : '缺'} 不含#${ORDER_EXPIRED}:${noExpired}`
+      + (paidBase !== null ? ` 实付基线=${cents(paidBase)}` : ''))
     note('R-01a 表单选项', `reasons=${eligibleReasons.length} 项 methods=${JSON.stringify((r.json && r.json.methods) || [])}`)
   }
+  // 复位成功且实付已知时做一次交叉校验：实时可退应恰等于实付
+  if (resetOk && paidBase !== null && base !== null && base !== paidBase) {
+    note('R-01a 基线提示', `复位后可退=${cents(base)} 与实付=${cents(paidBase)} 不等，按实时值 ${cents(base)} 继续`)
+  }
+  if (base === null) base = paidBase // 兜底：可退列表取不到时用实付基线
 
-  // ---- 步骤 2：R-10a 金额边界组（在造数前打，refundable 为全量 10.00 基线）
+  // ---- 步骤 2：R-10a 金额边界组（在造数前打，基线为当前可退余额）
   {
+    const over = ((base + 1) / 100).toFixed(2)
     const cases = [
       { name: '空金额', amount: '' },
       { name: '负数', amount: '-1' },
       { name: '零', amount: '0' },
-      { name: '超可退上限', amount: '10.01' },
+      { name: '超可退上限', amount: over },
     ]
     const fails = []
     for (const c of cases) {
@@ -1281,10 +1389,20 @@ async function flowRefund({ adminPage, customerPage, marker }) {
       await sleep(150)
     }
     check('R-10a', 'P0', '金额边界组全部拒绝且不 500', fails.length === 0,
-      fails.length ? fails.join(' | ') : '空/负/零/超额 4 例均业务拒绝')
+      fails.length ? fails.join(' | ') : `空/负/零/超额(${over}) 4 例均业务拒绝`)
   }
 
   // ---- 步骤 3：R-02 前台 UI 创建
+  // 申请金额由本轮可退基线推导：基线≥8.00 时按原设计取 6.00，否则留出后续小额用例的份额。
+  const AMT_CENTS = base >= 800 ? 600 : Math.max(100, base - 300)
+  const AMT = (AMT_CENTS / 100).toFixed(2)
+  // 后续小额用例（r04/r07）金额同样自适应，保证不超过 r02 之后的剩余额度。
+  const restAfterMain = base - AMT_CENTS
+  const SMALL_CENTS = Math.min(100, Math.max(1, Math.floor((restAfterMain - 1) / 2)))
+  const SMALL = (SMALL_CENTS / 100).toFixed(2)
+  const TINY_CENTS = Math.min(1, Math.max(1, restAfterMain - 2 * SMALL_CENTS))
+  const TINY = (TINY_CENTS / 100).toFixed(2)
+  note('R-02 金额推导', `可退基线=${cents(base)} → 主申请=${AMT}；小额用例=${SMALL}；自动通过探针=${TINY}`)
   let createOk = false
   {
     await gotoClient()
@@ -1302,7 +1420,7 @@ async function flowRefund({ adminPage, customerPage, marker }) {
         if (!picked) why = `订单下拉未选到 #${ORDER_MAIN}`
         else {
           await customerPage.click('.el-drawer .el-input-number input', { clickCount: 3 })
-          await customerPage.type('.el-drawer .el-input-number input', '6.00', { delay: 20 })
+          await customerPage.type('.el-drawer .el-input-number input', AMT, { delay: 20 })
           await customerPage.keyboard.press('Tab')
           await openSelectByPlaceholder(customerPage, '请选择退款原因')
           const reasonPat = eligibleReasons.length ? `^(${eligibleReasons.map(escapeReg).join('|')})$` : '.+'
@@ -1319,10 +1437,10 @@ async function flowRefund({ adminPage, customerPage, marker }) {
       createOk = !!(net && rec)
       if (!createOk) why = `提交后未形成 pending（net=${net ? '有' : '无'}）`
     }
-    check('R-02', 'P0', '前台提交退款申请（UI 全路径）', createOk, why || `订单#${ORDER_MAIN} 金额6.00 进入待审核`)
+    check('R-02', 'P0', '前台提交退款申请（UI 全路径）', createOk, why || `订单#${ORDER_MAIN} 金额${AMT} 进入待审核`)
     if (!createOk) {
       note('R-02 降级', 'UI 创建失败，改 API 补建 pending 以保全后续步骤')
-      await createApi('r02', ORDER_MAIN, '6.00', eligibleReasons[0])
+      await createApi('r02', ORDER_MAIN, AMT, eligibleReasons[0])
       await waitFind(() => findMy('r02', 'pending'), 8000)
     }
   }
@@ -1348,7 +1466,7 @@ async function flowRefund({ adminPage, customerPage, marker }) {
 
   // ---- 步骤 6：R-06 同订单重复申请被拒
   {
-    const r = await createApi('r02-dup', ORDER_MAIN, '1.00', eligibleReasons[0])
+    const r = await createApi('r02-dup', ORDER_MAIN, SMALL, eligibleReasons[0])
     const msg = (r.json && (r.json.msg || r.json.message)) || r.text || ''
     const rejected = r.status < 500 && r.json && String(r.json.ok) !== '1' && /进行中/.test(msg)
     check('R-06', 'P0', '同订单重复申请被拒（幂等）', !!rejected, `status=${r.status} msg=${msg}`)
@@ -1363,7 +1481,7 @@ async function flowRefund({ adminPage, customerPage, marker }) {
     if (!rec) why = '无 pending 记录'
     else {
       const netMark = netLog.length
-      const clicked = await clickRowButton(customerPage, `#${rec.order_id}`, '撤回', '￥6.00')
+      const clicked = await clickRowButton(customerPage, `#${rec.order_id}`, '撤回', `￥${AMT}`)
       if (clicked !== 'clicked') why = `行内撤回按钮(${clicked})`
       else if (!(await confirmBox(customerPage, '撤回'))) why = '撤回确认框未出现'
       else {
@@ -1375,7 +1493,7 @@ async function flowRefund({ adminPage, customerPage, marker }) {
     }
     let rebuildOk = false
     if (withdrawOk) {
-      const r = await createApi('r02', ORDER_MAIN, '6.00', eligibleReasons[0])
+      const r = await createApi('r02', ORDER_MAIN, AMT, eligibleReasons[0])
       rebuildOk = !!(r.json && String(r.json.ok) === '1')
       if (rebuildOk) rec = await waitFind(() => findMy('r02', 'pending'), 8000)
     }
@@ -1424,9 +1542,9 @@ async function flowRefund({ adminPage, customerPage, marker }) {
       }, 10000)
       const balAfter = await userBalance()
       const statsA = await adminStats()
-      const balOk = balBefore !== null && balAfter !== null && balAfter - balBefore === 600
+      const balOk = balBefore !== null && balAfter !== null && balAfter - balBefore === AMT_CENTS
       check('R-03', 'P0', `后台审批通过（${via}）+ 余额入账 + 状态翻转`, uiOk && !!after && balOk,
-        `余额 ${cents(balBefore)}→${cents(balAfter)}（应+6.00）状态=${after ? after.status : 'N/A'}`)
+        `余额 ${cents(balBefore)}→${cents(balAfter)}（应+${AMT}）状态=${after ? after.status : 'N/A'}`)
       const statOk = approvedBefore !== null && statsA && statsA.approved === approvedBefore + 1
       check('R-03c', 'P1', '后台统计同步（已通过+1）', !!statOk,
         `approved ${approvedBefore}→${statsA ? statsA.approved : 'N/A'}`)
@@ -1448,7 +1566,7 @@ async function flowRefund({ adminPage, customerPage, marker }) {
 
   // ---- 步骤 10：R-04 驳回（空备注前端拦截 + 备注前台详情可见）
   {
-    await createApi('r04', ORDER_MAIN, '1.00', eligibleReasons[0])
+    await createApi('r04', ORDER_MAIN, SMALL, eligibleReasons[0])
     const target = await waitFind(() => findMy('r04', 'pending'), 8000)
     if (!target) {
       check('R-04', 'P0', '驳回及备注前台可见', false, '造数失败（r04 未形成 pending）')
@@ -1491,7 +1609,7 @@ async function flowRefund({ adminPage, customerPage, marker }) {
       let noteVisible = false
       if (after) {
         await gotoClient()
-        if ((await clickRowButton(customerPage, `#${after.order_id}`, '详情', '￥1.00')) === 'clicked') {
+        if ((await clickRowButton(customerPage, `#${after.order_id}`, '详情', `￥${SMALL}`)) === 'clicked') {
           const dlg = await customerPage.waitForSelector('.el-dialog', { timeout: 8000 }).catch(() => null)
           if (dlg) {
             const txt = await customerPage.evaluate(() => (document.querySelector('.el-dialog') || {}).textContent || '')
@@ -1506,7 +1624,7 @@ async function flowRefund({ adminPage, customerPage, marker }) {
 
   // ---- 步骤 11：R-07 并发审批仅一人成功
   {
-    await createApi('r07', ORDER_MAIN, '1.00', eligibleReasons[0])
+    await createApi('r07', ORDER_MAIN, SMALL, eligibleReasons[0])
     const target = await waitFind(() => findMy('r07', 'pending'), 8000)
     if (!target) {
       check('R-07', 'P0', '并发审批仅一人成功', false, '造数失败（r07 未形成 pending）')
@@ -1557,7 +1675,7 @@ async function flowRefund({ adminPage, customerPage, marker }) {
       check('R-09a', 'P0', '配置自动通过（number 字段 JSON 数字）', touched,
         `status=${set.status} msg=${(set.json && set.json.msg) || ''}`)
       if (touched) {
-        await createApi('r09', ORDER_MAIN, '0.01', eligibleReasons[0])
+        await createApi('r09', ORDER_MAIN, TINY, eligibleReasons[0])
         const auto = await waitFind(async () => {
           const m = await findMy('r09')
           return m && m.status === 'approved' ? m : null
@@ -1575,17 +1693,19 @@ async function flowRefund({ adminPage, customerPage, marker }) {
     }
   }
 
-  // ---- 步骤 14：R-11 可退余额对账（refundable = 实付 - 已退合计）
+  // ---- 步骤 14：R-11 可退余额对账（refundable = 本轮基线 - 本轮已退合计）
   {
     const doneSum = (await myList())
       .filter((x) => String(x.detail || '').includes(marker) && x.status === 'approved')
       .reduce((s, x) => s + toCents(x.amount), 0)
     const r = await pageApi(customerPage, 'GET', '/plugin/refund/eligible-orders')
     const o = ((r.json && r.json.orders) || []).find((x) => x.id === ORDER_MAIN)
-    const expect = 1000 - doneSum
+    // 基线取本轮开跑时的可退余额（复位后等于实付），而非写死 10.00：
+    // 这样即使复位不可用、本轮从剩余额度起步，对账依然成立。
+    const expect = base - doneSum
     const actual = o ? toCents(o.refundable) : null
-    check('R-11', 'P0', '可退余额 = 实付 - 已退合计（对账）', actual !== null && actual === expect,
-      `订单#${ORDER_MAIN} refundable=${o ? o.refundable : 'N/A'} 期望=${cents(expect)}（本轮已退 ${cents(doneSum)}）`)
+    check('R-11', 'P0', '可退余额 = 起点可退 - 已退合计（对账）', actual !== null && actual === expect,
+      `订单#${ORDER_MAIN} refundable=${o ? o.refundable : 'N/A'} 期望=${cents(expect)}（起点 ${cents(base)} − 本轮已退 ${cents(doneSum)}）`)
   }
 
   // ---- 步骤 15：收尾（撤回残留 pending；保留 rejected/approved 供探针与对账取证）
@@ -1810,7 +1930,6 @@ async function flowAnnouncement({ adminPage, customerPage, marker }) {
 // ---------------------------------------------------------------- webhooknotify 业务流（S2c：W-01~W-10）
 
 async function flowWebhooknotify({ adminPage, customerPage, marker }) {
-  const PSQL = 'D:/lumeidc-dev/pgsql/bin/psql.exe'
   // D 系列三视图检查后页面停留在移动视口（375px），恢复桌面视口再操作后台
   await adminPage.setViewport({ width: 1440, height: 900 })
   // 目标 URL 与当前相同时 goto 可能不重新加载文档（后台 hash 路由），附加一次性 query 强制导航
@@ -2120,7 +2239,7 @@ async function flowTickets({ adminPage, customerPage, marker }) {
   // ---- 局部工具 ----
   const psql = (sql) => {
     try {
-      return execSync(`"D:/lumeidc-dev/pgsql/bin/psql.exe" -h 127.0.0.1 -p 5433 -U lumeidc -d lumeidc -t -A -c "${sql}"`,
+      return execSync(`"${PSQL}" -h 127.0.0.1 -p 5433 -U lumeidc -d lumeidc -t -A -c "${sql}"`,
         { env: { ...process.env, PGPASSWORD: 'lumeidc_dev' }, encoding: 'utf8', timeout: 15000 }).trim()
     } catch (e) {
       return null
@@ -2414,7 +2533,7 @@ async function flowDailyreport({ adminPage, customerPage, marker }) {
 
   const psql = (sql) => {
     try {
-      return execSync(`"D:/lumeidc-dev/pgsql/bin/psql.exe" -h 127.0.0.1 -p 5433 -U lumeidc -d lumeidc -t -A -c "${sql}"`,
+      return execSync(`"${PSQL}" -h 127.0.0.1 -p 5433 -U lumeidc -d lumeidc -t -A -c "${sql}"`,
         { env: { ...process.env, PGPASSWORD: 'lumeidc_dev', PGCLIENTENCODING: 'UTF8' }, encoding: 'utf8', timeout: 15000 }).trim()
     } catch (e) {
       return null
@@ -2579,6 +2698,377 @@ async function flowDailyreport({ adminPage, customerPage, marker }) {
   }
 }
 
+// ---------------------------------------------------------------- spaceship 业务流
+
+/**
+ * QA 环境通常未配置 Spaceship API Key/Secret，注册/查询类断言一律取「安全拒绝」判据
+ * （ok:0 且无 500），不依赖上游连通性；UI 断言只验证三 Tab 切换与面板显隐。
+ * S-06~S-08 需要真实落库数据：经 psql 直插域名/联系人/操作记录，再走 API 验证
+ * 自动续费状态机、操作重试入口与联系人增删设默认（含归属校验与默认唯一性）；
+ * 上游连通相关的轮询深链路（ListPending→pollOne→回补/回退）由 Go 单测
+ * poll_test.go 以 mock 客户端覆盖。
+ */
+async function flowSpaceship({ adminPage, customerPage, marker }) {
+  // D 系列三视图检查后页面停留在移动视口（375px），业务流统一恢复桌面视口
+  await adminPage.setViewport({ width: 1440, height: 900 })
+  await customerPage.setViewport({ width: 1440, height: 900 })
+
+  // ---- 局部工具 ----
+  const psql = (sql) => {
+    try {
+      return execSync(`"${PSQL}" -h 127.0.0.1 -p 5433 -U lumeidc -d lumeidc -t -A -c "${sql}"`,
+        { env: { ...process.env, PGPASSWORD: 'lumeidc_dev' }, encoding: 'utf8', timeout: 15000 }).trim()
+    } catch (e) {
+      return null
+    }
+  }
+  // INSERT ... RETURNING id 在 -t -A 下仍会附带「INSERT 0 1」命令标签行，结果行在前，取首行
+  const psqlId = (sql) => {
+    const out = psql(sql)
+    return out ? out.split(/\r?\n/)[0].trim() : null
+  }
+  // 页内取当前登录用户 id（/session 已登录时回带 user.id）
+  const sessionUser = (page) => page.evaluate(async () => {
+    const s = await fetch('/__api/session', { credentials: 'same-origin', cache: 'no-store', headers: { Accept: 'application/json' } })
+    return ((await s.json()) || {}).user || null
+  }).catch(() => null)
+  // QA 造数命名（marker 含日期，同日复跑不撞唯一约束）
+  const dmActive = `qa-s06a-${marker}.test`
+  const dmPending = `qa-s06p-${marker}.test`
+  const opKey = `qa-s07op-${marker}`
+  const cidA = `qa-s08a-${marker}`
+  const cidB = `qa-s08b-${marker}`
+  const cidAlt = `qa-s08alt-${marker}`
+  const cleanQaData = () => {
+    psql(`DELETE FROM plugin_spaceship_operations WHERE operation_id LIKE 'qa-s07op-%'`)
+    psql(`DELETE FROM plugin_spaceship_domains WHERE domain LIKE 'qa-s06%'`)
+    psql(`DELETE FROM plugin_spaceship_contacts WHERE contact_id LIKE 'qa-s08%'`)
+  }
+  cleanQaData() // 前置清理：同一天复跑或上次异常退出时的历史残留
+
+  // ---- S-01：后台域名管理/联系人/操作日志三 Tab 可切换，面板显隐跟随 ----
+  const pageErrors = attachErrorCollector(adminPage)
+  await adminPage.goto(BASE + '/admin#/plugin/spaceship', { waitUntil: 'domcontentloaded', timeout: 25000 })
+  await adminPage.waitForSelector('.spaceship-tabs', { timeout: 15000 }).catch(() => null)
+  const tabs = ['域名管理', '联系人', '操作日志']
+  const tabResults = []
+  for (let i = 0; i < tabs.length; i++) {
+    const clicked = await adminPage.evaluate((idx) => {
+      const btn = document.querySelectorAll('.spaceship-tab')[idx]
+      if (btn) { btn.click(); return true }
+      return false
+    }, i).catch(() => false)
+    await sleep(500)
+    // Vue 响应式更新后复核：对应 Tab 高亮 + 对应面板 display 非 none（面板顺序同模板 v-show）
+    const state = await adminPage.evaluate((idx) => {
+      const btns = [...document.querySelectorAll('.spaceship-tab')]
+      const wrap = document.querySelector('.spaceship-tabs').parentElement
+      const panels = [...wrap.children].filter((el) => el.tagName === 'DIV' && !el.classList.contains('spaceship-tabs'))
+      return {
+        active: !!btns[idx] && btns[idx].classList.contains('active'),
+        panel: !!panels[idx] && getComputedStyle(panels[idx]).display !== 'none',
+      }
+    }, i).catch(() => ({ active: false, panel: false }))
+    tabResults.push(clicked && state.active && state.panel)
+  }
+  check('S-01', 'P1', '后台三 Tab（域名管理/联系人/操作日志）切换渲染',
+    tabResults.every(Boolean),
+    tabResults.map((ok, i) => `${tabs[i]} ${ok ? '可见' : '异常'}`).join('；'))
+
+  // ---- S-02：测试连接走真实网络请求，无服务端错误 ----
+  const netIdx = netLog.length
+  await adminPage.evaluate(() => {
+    const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').includes('测试 Spaceship 连接'))
+    btn && btn.click()
+  })
+  const testHit = await waitNetEntry(/\/admin\/plugin\/spaceship\/client\/test/, netIdx)
+  const testStatus = testHit && testHit.match(/POST (\d+) /)
+  check('S-02', 'P1', '测试连接提交真实请求且无服务端错误',
+    !!testHit && !!testStatus && Number(testStatus[1]) < 500,
+    testHit ? testHit.slice(0, 130) : '未捕获 /client/test 请求轨迹')
+
+  // ---- S-03：前台可用性查询（UI 触发，原生 setter 保证 v-model 收到输入）----
+  await customerPage.goto(BASE + '/plugin/spaceship', { waitUntil: 'domcontentloaded', timeout: 25000 })
+  await customerPage.waitForSelector('.spaceship-tabs', { timeout: 15000 }).catch(() => null)
+  const netIdx2 = netLog.length
+  await customerPage.evaluate(() => {
+    const ta = document.querySelector('textarea')
+    if (ta) {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set
+      setter.call(ta, 'qa-probe.invalid')
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === '查询可用性')
+    btn && btn.click()
+  })
+  const checkHit = await waitNetEntry(/\/plugin\/spaceship\/check/, netIdx2)
+  const checkStatus = checkHit && checkHit.match(/POST (\d+) /)
+  check('S-03', 'P1', '前台可用性查询提交真实请求且无服务端错误',
+    !!checkHit && !!checkStatus && Number(checkStatus[1]) < 500,
+    checkHit ? checkHit.slice(0, 130) : '未捕获 /check 请求轨迹')
+
+  // ---- S-04：空域名注册被安全拒绝（未配 API 返回「未配置」；已配则「域名格式错误」，均 ok:0）----
+  const regRes = await pageApi(customerPage, 'POST', '/plugin/spaceship/register', { domain: '', years: 1, paidAmount: '' })
+  check('S-04', 'P1', '空域名注册被安全拒绝',
+    regRes.status === 200 && !!regRes.json && regRes.json.ok === 0,
+    `HTTP ${regRes.status} ${regRes.text.slice(0, 80)}`)
+
+  // ---- S-05：业务流期间后台页面无 console/pageerror ----
+  check('S-05', 'P1', '业务流期间后台页面无 console/pageerror',
+    pageErrors.length === 0,
+    pageErrors.length ? pageErrors[0].slice(0, 120) : '无页面错误')
+
+  // ---- S-06/S-07/S-08：需要真实落库数据，psql 直插后经 API 验证 ----
+  try {
+    // ---- S-06：自动续费开关状态机（active 开/关落库 + 前后台回读一致；pending 拒绝）----
+    {
+      const myUser = await sessionUser(customerPage)
+      const myId = myUser && myUser.id
+      if (!myId || psql('SELECT 1') === null) {
+        skip('S-06', 'P1', '自动续费状态机（active 开/关落库 + 前后台回读一致；pending 拒绝）',
+          !myId ? '前台会话未取到用户 id' : 'psql 不可用，无法直插测试域名')
+      } else {
+        // active 不置 spaceship_domain_id：clientAutoRenew 跳过上游调用仅落库（QA 环境确定性判据）
+        const activeId = psqlId(`INSERT INTO plugin_spaceship_domains (user_id,domain,years,paid_amount_cents,status,privacy_level,auto_renew) VALUES (${myId},'${dmActive}',1,10000,'active','high',false) RETURNING id`)
+        const pendingId = psqlId(`INSERT INTO plugin_spaceship_domains (user_id,domain,years,paid_amount_cents,status,privacy_level,auto_renew) VALUES (${myId},'${dmPending}',1,10000,'pending','high',false) RETURNING id`)
+        const readRenew = async (page, path, id) => {
+          const r = await pageApi(page, 'GET', path)
+          const row = ((r.json && r.json.list) || []).find((d) => Number(d.id) === Number(id))
+          return row ? row.autoRenew : null
+        }
+        const on = await pageApi(customerPage, 'POST', `/plugin/spaceship/my/${activeId}/autorenew`, { enable: true })
+        const onRead = await readRenew(customerPage, '/plugin/spaceship/my', activeId)
+        const onAdmin = await readRenew(adminPage, '/admin/plugin/spaceship/domains', activeId)
+        const dbOn = psql(`SELECT auto_renew FROM plugin_spaceship_domains WHERE id=${activeId}`)
+        const off = await pageApi(customerPage, 'POST', `/plugin/spaceship/my/${activeId}/autorenew`, { enable: false })
+        const offRead = await readRenew(customerPage, '/plugin/spaceship/my', activeId)
+        const offAdmin = await readRenew(adminPage, '/admin/plugin/spaceship/domains', activeId)
+        const dbOff = psql(`SELECT auto_renew FROM plugin_spaceship_domains WHERE id=${activeId}`)
+        const pend = await pageApi(customerPage, 'POST', `/plugin/spaceship/my/${pendingId}/autorenew`, { enable: true })
+        check('S-06', 'P1', '自动续费状态机（active 开/关落库 + 前后台回读一致；pending 拒绝）',
+          !!activeId && !!pendingId &&
+          on.status === 200 && on.json && on.json.ok === 1 && onRead === true && onAdmin === true && dbOn === 't' &&
+          off.status === 200 && off.json && off.json.ok === 1 && offRead === false && offAdmin === false && dbOff === 'f' &&
+          pend.status === 200 && pend.json && pend.json.ok === 0 && /仅 active/.test((pend.json && pend.json.msg) || pend.text),
+          `开=${on.json && on.json.ok}/前台:${onRead}/后台:${onAdmin}/DB:${dbOn} 关=${off.json && off.json.ok}/前台:${offRead}/后台:${offAdmin}/DB:${dbOff} pending=${pend.json && pend.json.ok} ${(pend.json && pend.json.msg) || pend.text.slice(0, 30)}`)
+      }
+    }
+
+    // ---- S-07：异步操作（pending 直插后管理端可见；retry 入口存在且安全拒绝/触发）----
+    {
+      if (psql('SELECT 1') === null) {
+        skip('S-07', 'P1', '异步操作（pending 管理端可见；retry 入口存在且安全拒绝/触发）', 'psql 不可用，无法直插操作记录')
+      } else {
+        // started_at 取 20 分钟前，落在 ListPending 的 15 分钟窗口之外：cron（默认 30s 一轮）
+        // 不会在断言前改写状态，列表回读确定；cron 捞取→pollOne→回补/回退深链路由
+        // Go 单测 poll_test.go 以 mock 客户端覆盖
+        const opRowId = psqlId(`INSERT INTO plugin_spaceship_operations (operation_id,domain,op_type,status,started_at) VALUES ('${opKey}','${dmActive}','domain_create','pending',now() - interval '20 minutes') RETURNING id`)
+        const listRes = await pageApi(adminPage, 'GET', '/admin/plugin/spaceship/operations')
+        const items = (listRes.json && listRes.json.items) || []
+        const mine = items.find((o) => o.OperationID === opKey)
+        const retry = opRowId
+          ? await pageApi(adminPage, 'POST', `/admin/plugin/spaceship/operations/${opRowId}/retry`, {})
+          : { status: 0, json: null, text: 'no db row' }
+        const retryGate = retry.status === 200 && retry.json && (
+          (retry.json.ok === 0 && /未配置/.test((retry.json && retry.json.msg) || retry.text)) || // QA 无凭证：JSONFail 安全拒绝
+          retry.json.ok === 1 // 已配凭证：真实触发一次轮询
+        )
+        check('S-07', 'P1', '异步操作（pending 管理端可见；retry 入口存在且安全拒绝/触发）',
+          !!opRowId && listRes.status === 200 && !!mine && mine.Status === 'pending' && retryGate,
+          `可见=${!!mine}(status:${mine && mine.Status}) retry=${retry.json && retry.json.ok} ${retry.text.slice(0, 40)}；cron 捞取/pollOne 深链路见 Go 单测 poll_test.go`)
+      }
+    }
+
+    // ---- S-08：联系人管理（新增门禁；404/403/删除/设默认；默认唯一性）----
+    {
+      // 门禁：缺必填字段时，无凭证返回「未配置」、有凭证返回「必填」，均为 ok:0（不依赖上游）
+      const saveGate = await pageApi(customerPage, 'POST', '/plugin/spaceship/my/contacts', { firstName: 'QA' })
+      const myUser = await sessionUser(customerPage)
+      const myId = myUser && myUser.id
+      if (!myId || psql('SELECT 1') === null) {
+        check('S-08', 'P1', '联系人管理（新增门禁 + 404/403/删除/设默认 + 默认唯一性）',
+          saveGate.status === 200 && saveGate.json && saveGate.json.ok === 0,
+          `新增门禁=${(saveGate.json && saveGate.json.msg) || saveGate.text.slice(0, 30)}；DB 直插部分跳过（${!myId ? '无用户 id' : 'psql 不可用'}）`)
+      } else {
+        const altPage = await ensureAltPage()
+        const altUser = altPage ? await sessionUser(altPage) : null
+        const altId = altUser && altUser.id
+        // SQL 字面量保持纯 ASCII：非 ASCII 经 cmd 编码转换会触发 psql「invalid byte sequence」
+        const idA = psqlId(`INSERT INTO plugin_spaceship_contacts (contact_id,user_id,label,first_name,last_name,email,address1,city,country,phone,is_default) VALUES ('${cidA}',${myId},'QA A','Qa','A','${cidA}@lumeidc.local','QA Street','Shanghai','CN','+86.13800000001',false) RETURNING id`)
+        const idB = psqlId(`INSERT INTO plugin_spaceship_contacts (contact_id,user_id,label,first_name,last_name,email,address1,city,country,phone,is_default) VALUES ('${cidB}',${myId},'QA B','Qa','B','${cidB}@lumeidc.local','QA Street','Shanghai','CN','+86.13800000002',false) RETURNING id`)
+        const idAlt = altId
+          ? psqlId(`INSERT INTO plugin_spaceship_contacts (contact_id,user_id,label,first_name,last_name,email,address1,city,country,phone,is_default) VALUES ('${cidAlt}',${altId},'QA Alt','Qa','Alt','${cidAlt}@lumeidc.local','QA Street','Shanghai','CN','+86.13800000003',false) RETURNING id`)
+          : ''
+        const missDel = await pageApi(customerPage, 'POST', '/plugin/spaceship/my/contacts/999999999/delete', {})
+        const missDef = await pageApi(customerPage, 'POST', '/plugin/spaceship/my/contacts/999999999/default', {})
+        const altDel = idAlt ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/contacts/${idAlt}/delete`, {}) : null
+        const altDef = idAlt ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/contacts/${idAlt}/default`, {}) : null
+        const readContacts = async () => {
+          const r = await pageApi(customerPage, 'GET', '/plugin/spaceship/my/contacts')
+          return (r.json && r.json.list) || []
+        }
+        const setA = idA ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/contacts/${idA}/default`, {}) : null
+        const rowsA = await readContacts()
+        const setB = idB ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/contacts/${idB}/default`, {}) : null
+        const rowsB = await readContacts()
+        const delB = idB ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/contacts/${idB}/delete`, {}) : null
+        const rowsAfterDel = await readContacts()
+        const defA = rowsA.filter((c) => c.isDefault)
+        const defB = rowsB.filter((c) => c.isDefault)
+        check('S-08', 'P1', '联系人管理（新增门禁 + 404/403/删除/设默认 + 默认唯一性）',
+          saveGate.status === 200 && saveGate.json && saveGate.json.ok === 0 &&
+          missDel.status === 404 && missDef.status === 404 &&
+          (!altDel || (altDel.status === 403 && altDef.status === 403)) &&
+          !!setA && setA.json && setA.json.ok === 1 && defA.length === 1 && Number(defA[0].id) === Number(idA) &&
+          !!setB && setB.json && setB.json.ok === 1 && defB.length === 1 && Number(defB[0].id) === Number(idB) &&
+          !!delB && delB.json && delB.json.ok === 1 && !rowsAfterDel.some((c) => Number(c.id) === Number(idB)),
+          `新增门禁=${(saveGate.json && saveGate.json.msg) || saveGate.text.slice(0, 20)}；404=${missDel.status}/${missDef.status}；越权403=${altDel ? `${altDel.status}/${altDef && altDef.status}` : 'alt账号不可用，跳过'}；默认唯一 A=${defA.map((c) => c.id)} B=${defB.map((c) => c.id)}；删B后仍在列=${rowsAfterDel.some((c) => Number(c.id) === Number(idB))}`)
+      }
+    }
+    // ---- S-09：后台代注册的资金一致性（不依赖真实凭证：无凭证安全拒绝，有凭证按服务端价扣款）----
+    {
+      // QA 环境未配 Key 时 adminRegisterDomain 先于任何扣款返回「未配置」，
+      // 断言 ok:0 且用户余额零变动 —— 即"绝不出现上游已注册但本地未扣款/未记账"。
+      const myUser = await sessionUser(customerPage)
+      const myId = myUser && myUser.id
+      if (!myId || psql('SELECT 1') === null) {
+        skip('S-09', 'P0', '后台代注册资金一致性（无凭证安全拒绝 + 余额零变动）',
+          !myId ? '前台会话未取到用户 id' : 'psql 不可用，无法读取余额')
+      } else {
+        // users.balance 为 numeric 元（非分），按文本比较避免 JS 浮点误差
+        const balSql = `SELECT balance::text FROM users WHERE id=${myId}`
+        const before = (psql(balSql) || '0').trim()
+        const reg = await pageApi(adminPage, 'POST', '/admin/plugin/spaceship/domains/register',
+          { domain: `qa-s09-${marker}.test`, years: 1, contactId: 0, userId: myId })
+        const after = (psql(balSql) || '0').trim()
+        const noDom = psql(`SELECT count(*) FROM plugin_spaceship_domains WHERE domain LIKE 'qa-s09-%'`)
+        const safeReject = reg.status === 200 && reg.json && reg.json.ok === 0 &&
+          /未配置|未启用|价格|请指定|不存在|不支持|失败|错误/.test((reg.json && reg.json.msg) || reg.text)
+        check('S-09', 'P0', '后台代注册资金一致性（无凭证安全拒绝 + 余额零变动）',
+          safeReject && after === before && Number(noDom) === 0,
+          `ok=${reg.json && reg.json.ok} msg=${(reg.json && reg.json.msg) || reg.text.slice(0, 40)}；余额 ${before}→${after}；qa-s09 域名数=${noDom}`)
+      }
+    }
+
+    // ---- S-10：服务端定价（前端传价一律无效；无价目表/未启用后缀拒绝；价目可读）----
+    {
+      const prices = await pageApi(adminPage, 'GET', '/admin/plugin/spaceship/prices')
+      const clientPrices = await pageApi(customerPage, 'GET', '/plugin/spaceship/prices')
+      const list = (prices.json && prices.json.list) || []
+      // 客户端改价探针：paidAmount 传 0.01，服务端若仍按客户端价扣款即为 P0 资损
+      const probe = await pageApi(customerPage, 'POST', '/plugin/spaceship/register',
+        { domain: `qa-s10-${marker}.test`, years: 1, paidAmount: '0.01' })
+      const clientOk = clientPrices.status === 200 && !!clientPrices.json && Array.isArray(clientPrices.json.list)
+      // 无凭证时返回「未配置」；已配凭证且后缀未定价时返回「未启用/未配置价格」——两者都必须是 ok:0
+      const gated = probe.status === 200 && probe.json && probe.json.ok === 0
+      check('S-10', 'P0', '服务端定价（价目可读 + 客户端传价无效 + 未定价后缀拒绝）',
+        prices.status === 200 && Array.isArray(list) && clientOk && gated,
+        `后台价目=${list.length}条/HTTP${prices.status}；前台价目HTTP${clientPrices.status}；改价探针ok=${probe.json && probe.json.ok} ${(probe.json && probe.json.msg) || probe.text.slice(0, 40)}`)
+    }
+
+    // ---- S-11：续费链路（无凭证安全拒绝；终态非法年份/非 active 一律拒绝，不产生扣款）----
+    {
+      const myUser = await sessionUser(customerPage)
+      const myId = myUser && myUser.id
+      if (!myId || psql('SELECT 1') === null) {
+        skip('S-11', 'P1', '续费可用（active 域名提交 + 非法年份/非 active 拒绝）',
+          !myId ? '前台会话未取到用户 id' : 'psql 不可用，无法直插域名')
+      } else {
+        // users.balance 为 numeric 元（非分），按文本比较避免 JS 浮点误差
+        const balSql = `SELECT balance::text FROM users WHERE id=${myId}`
+        const before = (psql(balSql) || '0').trim()
+        // 复用 S-06 已落库的 active / pending 域名；若 S-06 被跳过则自行补插（避免同域名重复插入）
+        let activeId = psql(`SELECT id FROM plugin_spaceship_domains WHERE domain='${dmActive}' LIMIT 1`)
+        let pendId = psql(`SELECT id FROM plugin_spaceship_domains WHERE domain='${dmPending}' LIMIT 1`)
+        if (!activeId) {
+          activeId = psqlId(`INSERT INTO plugin_spaceship_domains (user_id,domain,years,paid_amount_cents,status,privacy_level,auto_renew) VALUES (${myId},'${dmActive}',1,10000,'active','high',false) RETURNING id`)
+        }
+        if (!pendId) {
+          pendId = psqlId(`INSERT INTO plugin_spaceship_domains (user_id,domain,years,paid_amount_cents,status,privacy_level,auto_renew) VALUES (${myId},'${dmPending}',1,10000,'pending','high',false) RETURNING id`)
+        }
+        const rOk = activeId ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/${activeId}/renew`, { years: 1 }) : null
+        const rBadYears = activeId ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/${activeId}/renew`, { years: 99 }) : null
+        const rPend = pendId ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/${pendId}/renew`, { years: 1 }) : null
+        const after = (psql(balSql) || '0').trim()
+        // 无凭证：三者均 ok:0；已配凭证：years=1 可 ok:1、years=99 与非 active 仍 ok:0
+        const gated = (r) => r && r.status === 200 && r.json && r.json.ok === 0
+        const noCharge = gated(rOk) ? after === before : true
+        check('S-11', 'P1', '续费可用（active 域名提交 + 非法年份/非 active 拒绝）',
+          !!activeId && !!rOk && rOk.status === 200 && !!rOk.json &&
+          (rOk.json.ok === 1 || gated(rOk)) && gated(rBadYears) && (!rPend || gated(rPend)) && noCharge,
+          `active续费ok=${rOk && rOk.json && rOk.json.ok} ${(rOk && ((rOk.json && rOk.json.msg) || rOk.text.slice(0, 30))) || ''}；years=99 ok=${rBadYears && rBadYears.json && rBadYears.json.ok}；pending ok=${rPend && rPend.json && rPend.json.ok}；余额 ${before}→${after}`)
+      }
+    }
+
+    // ---- S-12：溢价域名管控（总开关默认关闭 → 前台自助与后台代注册均不放行）----
+    {
+      const chk = await pageApi(adminPage, 'POST', '/admin/plugin/spaceship/check', { domain: `qa-s12-${marker}.com` })
+      const premiumChecked = chk.status === 200 && !!chk.json
+      // 前台自助注册溢价域名：即便带任何参数也不得直接成交（必须由管理员确认报价）
+      const cReg = await pageApi(customerPage, 'POST', '/plugin/spaceship/register',
+        { domain: `qa-s12-${marker}.com`, years: 1, paidAmount: '9999' })
+      const myUser = await sessionUser(customerPage)
+      const myId = myUser && myUser.id
+      const aReg = myId ? await pageApi(adminPage, 'POST', '/admin/plugin/spaceship/domains/register',
+        { domain: `qa-s12-${marker}.com`, years: 1, userId: myId, allowPremium: true }) : null
+      const gated = (r) => r && r.status === 200 && r.json && r.json.ok === 0
+      check('S-12', 'P1', '溢价域名管控（报价可查 + 未开启售卖时前后台均拒绝）',
+        premiumChecked && gated(cReg) && (!aReg || gated(aReg)),
+        `报价查询HTTP${chk.status}；前台ok=${cReg.json && cReg.json.ok}；后台(allowPremium)ok=${aReg && aReg.json && aReg.json.ok} ${(aReg && ((aReg.json && aReg.json.msg) || aReg.text.slice(0, 30))) || ''}`)
+    }
+
+    // ---- S-13：异步操作终态保护（success/failed 重试被拒，不再重复轮询与重复通知）----
+    {
+      if (psql('SELECT 1') === null) {
+        skip('S-13', 'P1', '异步操作终态保护（success/failed 拒绝重试）', 'psql 不可用，无法直插终态操作')
+      } else {
+        const okKey = `${opKey}-ok`
+        const failKey = `${opKey}-fail`
+        const okId = psqlId(`INSERT INTO plugin_spaceship_operations (operation_id,domain,op_type,status,started_at,finished_at) VALUES ('${okKey}','${dmActive}','domain_create','success',now() - interval '30 minutes',now() - interval '29 minutes') RETURNING id`)
+        const failId = psqlId(`INSERT INTO plugin_spaceship_operations (operation_id,domain,op_type,status,started_at,finished_at) VALUES ('${failKey}','${dmActive}','domain_create','failed',now() - interval '30 minutes',now() - interval '29 minutes') RETURNING id`)
+        const rOk = okId ? await pageApi(adminPage, 'POST', `/admin/plugin/spaceship/operations/${okId}/retry`, {}) : null
+        const rFail = failId ? await pageApi(adminPage, 'POST', `/admin/plugin/spaceship/operations/${failId}/retry`, {}) : null
+        const terminal = (r) => r && r.status === 400 && /已结束|无需重试/.test((r.json && r.json.msg) || r.text)
+        check('S-13', 'P1', '异步操作终态保护（success/failed 拒绝重试）',
+          !!okId && !!failId && terminal(rOk) && terminal(rFail),
+          `success=${rOk && rOk.status} ${(rOk && ((rOk.json && rOk.json.msg) || rOk.text.slice(0, 30))) || ''}；failed=${rFail && rFail.status} ${(rFail && ((rFail.json && rFail.json.msg) || rFail.text.slice(0, 30))) || ''}`)
+      }
+    }
+
+    // ---- S-14：共享联系人越权（user_id IS NULL 只读：删除/设默认一律 403）----
+    {
+      const myUser = await sessionUser(customerPage)
+      const myId = myUser && myUser.id
+      if (!myId || psql('SELECT 1') === null) {
+        skip('S-14', 'P0', '共享联系人越权（user_id IS NULL 只读，删除/设默认 403）',
+          !myId ? '前台会话未取到用户 id' : 'psql 不可用，无法直插共享联系人')
+      } else {
+        const sharedCid = `qa-s14-${marker}`
+        // user_id 留空 = 管理员共享模板：注册时可用，但普通用户不得删/设默认
+        const sid = psqlId(`INSERT INTO plugin_spaceship_contacts (contact_id,user_id,label,first_name,last_name,email,address1,city,country,phone,is_default) VALUES ('${sharedCid}',NULL,'QA Shared','Qa','Shared','${sharedCid}@lumeidc.local','QA Street','Shanghai','CN','+86.13800000009',false) RETURNING id`)
+        const del = sid ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/contacts/${sid}/delete`, {}) : null
+        const def = sid ? await pageApi(customerPage, 'POST', `/plugin/spaceship/my/contacts/${sid}/default`, {}) : null
+        const still = sid ? psql(`SELECT count(*) FROM plugin_spaceship_contacts WHERE id=${sid}`) : '0'
+        const isDef = sid ? psql(`SELECT is_default FROM plugin_spaceship_contacts WHERE id=${sid}`) : 'f'
+        check('S-14', 'P0', '共享联系人越权（user_id IS NULL 只读，删除/设默认 403）',
+          !!sid && del && del.status === 403 && def && def.status === 403 &&
+          Number(still) === 1 && String(isDef).startsWith('f'),
+          `sid=${sid} 删除=${del && del.status} 设默认=${def && def.status}；仍存在=${still} is_default=${isDef}`)
+      }
+    }
+  } finally {
+    // ---- 收尾：清理 QA 直插数据（前缀匹配，仅动本流程造数）----
+    cleanQaData()
+    psql(`DELETE FROM plugin_spaceship_domains WHERE domain LIKE 'qa-s09%' OR domain LIKE 'qa-s10%' OR domain LIKE 'qa-s12%'`)
+    psql(`DELETE FROM plugin_spaceship_operations WHERE operation_id LIKE 'qa-s07op-%-ok' OR operation_id LIKE 'qa-s07op-%-fail'`)
+    psql(`DELETE FROM plugin_spaceship_contacts WHERE contact_id LIKE 'qa-s14%'`)
+    const leftD = psql(`SELECT count(*) FROM plugin_spaceship_domains WHERE domain LIKE 'qa-s06%'`)
+    const leftC = psql(`SELECT count(*) FROM plugin_spaceship_contacts WHERE contact_id LIKE 'qa-s08%'`)
+    const leftO = psql(`SELECT count(*) FROM plugin_spaceship_operations WHERE operation_id LIKE 'qa-s07op-%'`)
+    note('spaceship 收尾', `QA 造数清理后残留：域名=${leftD} 联系人=${leftC} 操作=${leftO}`)
+  }
+}
+
 // ---------------------------------------------------------------- 主流程
 
 const argv = process.argv.slice(2).filter((a) => !a.startsWith('-'))
@@ -2590,12 +3080,14 @@ if (unknown.length) {
   process.exit(1)
 }
 
-// 前置检查：dev server 与后端可用性
+// 前置检查：dev server 与后端可用性。
+// 注意：Vite 是 MPA dev server，根路径只有带上 Accept: text/html 才会落到模板入口，
+// 裸 fetch（Accept: */*）会被判定为非文档请求而 404。
 try {
-  const health = await fetch(BASE + '/', { method: 'GET' })
+  const health = await fetch(BASE + '/', { method: 'GET', headers: { Accept: 'text/html' } })
   if (!health.ok && health.status !== 200) throw new Error('HTTP ' + health.status)
 } catch (e) {
-  console.error(`无法访问前端 ${BASE}（${e.message}）。请先执行 npm run dev，并确认 Go 后端在 :8080 运行。`)
+  console.error(`无法访问前端 ${BASE}（${e.message}）。请先执行 npm run dev，并确认 Go 后端已运行。`)
   await browser.close()
   process.exit(1)
 }
@@ -2665,7 +3157,7 @@ for (const name of selected) {
   if (cfg.flow) {
     await cfg.flow({ adminPage, customerPage, marker: MARKER })
   } else {
-    skip('FLOW', 'P1', `${cfg.title} 业务流`, 'S1 只接入 violation 业务流，其余插件 S2 阶段补齐')
+    skip('FLOW', 'P1', `${cfg.title} 业务流`, '该插件暂未接入业务流检查（通用 C/B/D 模块已验证）')
   }
 }
 

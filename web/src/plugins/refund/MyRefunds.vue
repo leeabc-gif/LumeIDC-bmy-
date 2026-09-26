@@ -211,6 +211,24 @@ function onOrderChange() {
   }
 }
 
+let lastAmountWarnAt = 0
+/** 超出可退余额时显式提示并钳回：不可用 el-input-number 的 :max，
+ *  它在用户输入时静默钳制（填 6.00 会无声变 2.99），用户会误以为按自己填的金额提交。
+ *  这里在 change 时对原始输入做判断，超额则提示并显式改回上限。 */
+function onAmountChange(val: number | null | undefined) {
+  const max = maxRefundable.value
+  if (max <= 0 || val === null || val === undefined || !Number.isFinite(val)) return
+  if (val > max) {
+    form.value.amount = Number(max.toFixed(2))
+    // input-number 的 input 与 blur 均会触发 change，短时间内的重复提示做节流
+    const now = Date.now()
+    if (now - lastAmountWarnAt > 1500) {
+      lastAmountWarnAt = now
+      ElMessage.warning(`退款金额不能超过可退余额 ￥${formatMoney(max)}，已自动调整为 ￥${formatMoney(max)}`)
+    }
+  }
+}
+
 async function submit() {
   if (!form.value.order_id) {
     ElMessage.warning('请选择要退款的订单')
@@ -409,10 +427,10 @@ onMounted(() => {
             <el-input-number
               v-model="form.amount"
               :min="0.01"
-              :max="maxRefundable || undefined"
               :precision="2"
               :step="1"
               style="width: 100%"
+              @change="onAmountChange"
             />
             <div class="form-tip">最多可退 ￥{{ formatMoney(maxRefundable) }}</div>
           </el-form-item>
