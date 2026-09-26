@@ -11,11 +11,15 @@ const adminRegistry: Record<string, () => Promise<Component>> = {
   announcement: () => import('./announcement/Admin.vue'),
   tickets: () => import('./tickets/Admin.vue'),
   refund: () => import('./refund/Admin.vue'),
+  spaceship: () => import('./spaceship/Admin.vue'),
+  violation: () => import('./violation/Admin.vue'),
 }
 
 /** 前台用户中心插件页（ClientShell 使用，路由 /plugin/{name}） */
 const clientRegistry: Record<string, () => Promise<Component>> = {
   refund: () => import('./refund/MyRefunds.vue'),
+  spaceship: () => import('./spaceship/Client.vue'),
+  violation: () => import('./violation/PublicList.vue'),
 }
 
 /** 按插件名取后台页组件加载器；未注册返回 undefined。 */

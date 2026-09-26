@@ -219,6 +219,7 @@ func (p *Plugin) CronJobs() []plugin.CronJob {
 | `announcement` | 迁移建表、前后台 API、核心聚合点联动（启用态控制首页新闻区显隐） |
 | `tickets` | 复杂业务搬迁：前后台全套页面、cron 任务、通知模板触发、附件存储、自定义事件 |
 | `dailyreport` | 最薄插件：纯配置 + cron + 管理员通知，零建表零前端 |
+| `spaceship` | 外部 API 客户端 + 异步注册轮询（cron）+ 前后台 CRUD + 迁移建表 + 余额扣减 |
 
 ## 十二、接口类扩展：新增短信渠道
 

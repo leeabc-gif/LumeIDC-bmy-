@@ -8,8 +8,16 @@ describe('插件页面注册表', () => {
     expect(pluginComponent('refund')).toBeTypeOf('function')
   })
 
+  it('后台页已接线 spaceship', () => {
+    expect(pluginComponent('spaceship')).toBeTypeOf('function')
+  })
+
   it('前台页已接线 refund', () => {
     expect(clientPluginComponent('refund')).toBeTypeOf('function')
+  })
+
+  it('前台页已接线 spaceship', () => {
+    expect(clientPluginComponent('spaceship')).toBeTypeOf('function')
   })
 
   it('未注册插件返回 undefined（壳层据此提示未启用）', () => {

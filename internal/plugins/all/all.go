@@ -10,8 +10,10 @@ import (
 	_ "lumeidc/internal/plugins/easypanel" // 供应商（接口类）
 	_ "lumeidc/internal/plugins/refund"
 	_ "lumeidc/internal/plugins/sms" // 短信渠道（接口类）
+	_ "lumeidc/internal/plugins/spaceship"
 	_ "lumeidc/internal/plugins/tickets"
 	_ "lumeidc/internal/plugins/verify" // 实名渠道（接口类）
+	_ "lumeidc/internal/plugins/violation"
 	_ "lumeidc/internal/plugins/webhooknotify"
 	_ "lumeidc/internal/plugins/zjmf" // 供应商（接口类）
 )
