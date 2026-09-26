@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"lumeidc/internal/money"
@@ -88,6 +89,17 @@ func init() {
 type Plugin struct {
 	host     *plugin.Host
 	requests *Requests
+	// adminLimiter 管理端审核操作限流器（按 adminID|IP 双重键；懒加载）。
+	// 拒防审核被脚本批量点击 / 误操作刷量；不引入外部依赖。
+	adminLimiterOnce sync.Once
+	adminLimiter     *adminRateLimiter
+}
+
+func (p *Plugin) limiter() *adminRateLimiter {
+	p.adminLimiterOnce.Do(func() {
+		p.adminLimiter = newAdminRateLimiter()
+	})
+	return p.adminLimiter
 }
 
 func (p *Plugin) Info() plugin.Info {
@@ -336,4 +348,92 @@ func isValidDecimal(s string) bool {
 		}
 	}
 	return true
+}
+
+// ---- 管理端审核操作限流（防刷 / 防误操作） ----
+
+// adminRateLimiter 滑动窗口（window 长，默认 60s；limit 默认 30 次/分钟）。
+// key = "<adminID>|<ip>"。纯内存，进程重启即清零 —— 这是有意为之：
+//
+//	（1）审核操作的真风险是单进程内高频点击，DB 持久化反而拖慢审核主链路；
+//	（2）依赖外部基础设施会让"插件随框架装上即用"破坏。
+type adminRateLimiter struct {
+	mu       sync.Mutex
+	buckets  map[string][]time.Time
+	window   time.Duration
+	maxPerFn func(string) int
+}
+
+func newAdminRateLimiter() *adminRateLimiter {
+	return &adminRateLimiter{
+		buckets: map[string][]time.Time{},
+		window:  60 * time.Second,
+	}
+}
+
+// allow 记录一次访问并判断是否在限流内。返回 (allowed, retryAfter)；
+// 被拒时 retryAfter 表示"还需等多久才放行"，配合 429 Retry-After 头。
+func (l *adminRateLimiter) allow(key string, max int) (bool, time.Duration) {
+	if max <= 0 {
+		return true, 0
+	}
+	now := time.Now()
+	cutoff := now.Add(-l.window)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ts := l.buckets[key]
+	// 丢弃窗口外的旧记录
+	i := 0
+	for ; i < len(ts); i++ {
+		if ts[i].After(cutoff) {
+			break
+		}
+	}
+	ts = ts[i:]
+	if len(ts) >= max {
+		// 最早一条失效时间 = retry-after
+		return false, ts[0].Add(l.window).Sub(now)
+	}
+	ts = append(ts, now)
+	l.buckets[key] = ts
+	return true, 0
+}
+
+// checkAdminRate 管理员入口统一节流闸门（approve/reject 共用）。
+// 操作名用于日志/限流键，方便事后审计是谁刷的。
+//
+//	ratePerMin <= 0 时表示无限流（譬如本地开发或单管理员小机房）。
+//
+// adminID/IP 缺失（不应该发生，但保持健壮）按 IP-only / "anon" 回退。
+func (p *Plugin) checkAdminRate(r *http.Request, adminID int64, op string) (bool, time.Duration) {
+	rate := p.cfgInt(r.Context(), "adminApproveRatePerMin", 30)
+	if rate <= 0 {
+		return true, 0
+	}
+	ip := clientIP(r)
+	key := ip
+	if adminID > 0 {
+		key = strconv.FormatInt(adminID, 10) + "|" + ip
+	}
+	key = key + "|" + op
+	ok, retry := p.limiter().allow(key, rate)
+	return ok, retry
+}
+
+// clientIP 取请求来源 IP（X-Forwarded-For 优先，回退 RemoteAddr）。
+func clientIP(r *http.Request) string {
+	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); v != "" {
+		if i := strings.IndexByte(v, ','); i >= 0 {
+			v = v[:i]
+		}
+		return strings.TrimSpace(v)
+	}
+	if v := strings.TrimSpace(r.Header.Get("X-Real-IP")); v != "" {
+		return v
+	}
+	host := r.RemoteAddr
+	if i := strings.LastIndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	return host
 }

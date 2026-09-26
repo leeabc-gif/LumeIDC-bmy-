@@ -331,13 +331,25 @@ func (r *Requests) PaidOrderByUser(ctx context.Context, orderID, userID int64) (
 }
 
 // EligibleOrders 本人可退订单：已支付、无进行中申请、可退余额>0、
-// 在可退期限内（windowDays<=0 不限）；最多 100 条。
-func (r *Requests) EligibleOrders(ctx context.Context, userID int64, windowDays int) ([]OrderRow, error) {
+// 在可退期限内（windowDays<=0 不限）。
+//
+// limit / offset：分页参数。limit 必须 >=1，调用方负责 clamp 到合理范围
+// （handler 侧已 clamp 到 [1, maxEligibleLimit]）。SQL 多取 1 条用作"还有更多"
+// 探测，多余的一行会在末尾从 out 中丢弃。
+func (r *Requests) EligibleOrders(ctx context.Context, userID int64, windowDays, limit, offset int) ([]OrderRow, error) {
+	if limit < 1 {
+		limit = 1
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	noWindow := windowDays <= 0
 	var cutoff time.Time
 	if !noWindow {
 		cutoff = time.Now().Add(-time.Duration(windowDays) * 24 * time.Hour)
 	}
+	// 多取一行探 has_more。
+	fetch := limit + 1
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT o.id, o.product_id, o.amount::text, o.cycle, o.paid_at,
 		        (o.amount - COALESCE((SELECT SUM(rf.amount::numeric) FROM refunds rf
@@ -349,16 +361,21 @@ func (r *Requests) EligibleOrders(ctx context.Context, userID int64, windowDays 
 		   AND o.amount > COALESCE((SELECT SUM(rf.amount::numeric) FROM refunds rf
 		                            WHERE rf.order_id=o.id AND rf.status='done'),0)
 		   AND ($2 OR o.paid_at > $3)
-		 ORDER BY o.id DESC LIMIT 100`, userID, noWindow, cutoff)
+		 ORDER BY o.id DESC LIMIT $4 OFFSET $5`, userID, noWindow, cutoff, fetch, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]OrderRow, 0, 16)
+	out := make([]OrderRow, 0, limit)
 	for rows.Next() {
 		var o OrderRow
 		if err := rows.Scan(&o.ID, &o.ProductID, &o.Amount, &o.Cycle, &o.PaidAt, &o.Refundable); err != nil {
 			return nil, err
+		}
+		// 探到第 limit+1 条就停，多余的留给调用方判断 has_more。
+		if len(out) >= limit {
+			_ = rows.Close()
+			break
 		}
 		out = append(out, o)
 	}

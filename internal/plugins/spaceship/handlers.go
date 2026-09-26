@@ -713,6 +713,11 @@ func (p *Plugin) adminListOperations(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, map[string]any{"items": rows, "total": total})
 }
 
+// adminRetryOperation 管理员手动重试一次轮询：
+//   - 终态（success / failed）拒绝重试；重复触发既浪费上游额度又给用户"还在处理中"的错觉。
+//   - pending 但已超过 15 分钟窗口（ListPending 已主动丢弃），先把 started_at 重新置为 now()
+//     让下一次 cron 还能拣到，然后 pollOne 立刻拉一次 —— 这是"卡死复活"语义。
+//   - pending 且仍在窗口内，只走一次 pollOne 即可，不动时间戳。
 func (p *Plugin) adminRetryOperation(w http.ResponseWriter, r *http.Request) {
 	if !plugin.AdminOK(w, r) {
 		return
@@ -731,18 +736,28 @@ func (p *Plugin) adminRetryOperation(w http.ResponseWriter, r *http.Request) {
 		plugin.StatusFail(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// 终态操作不能重复触发：重试会给用户"还在处理中"的错觉，也浪费上游额度。
 	if op.Status == "success" || op.Status == "failed" {
 		plugin.StatusFail(w, http.StatusBadRequest, "该操作已结束（"+op.Status+"），无需重试")
 		return
 	}
-	// 直接调 pollOne 手动触发一次
+	// pending：先把 started_at 复位（no-op 若非 pending，亦不会有副作用），再手动 poll 一次。
+	resurrected := false
+	if op.Status == "pending" {
+		if ok, err := p.repo.MarkPendingRetried(r.Context(), op.ID); err == nil && ok &&
+			time.Since(op.StartedAt) > 15*time.Minute {
+			resurrected = true
+		}
+	}
 	c := p.cfgClient(r.Context())
 	if c == nil {
 		plugin.JSONFail(w, "Spaceship API Key/Secret 未配置")
 		return
 	}
 	_ = p.pollOne(r.Context(), c, op)
+	if resurrected {
+		writeOKMsg(w, "操作已从卡死状态恢复，并触发了一次轮询")
+		return
+	}
 	writeOKMsg(w, "已触发轮询")
 }
 

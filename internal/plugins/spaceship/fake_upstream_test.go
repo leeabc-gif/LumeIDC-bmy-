@@ -90,6 +90,14 @@ func (f *fakeUpstream) setOutcome(domain, status string) {
 	f.registerOutcome[strings.ToLower(domain)] = status
 }
 
+// SetOpStatus 改写某个 operationId 的异步状态（用于模拟"卡 pending → 后续变 success"）。
+// 仅测试用，不能让生产代码改动。
+func (f *fakeUpstream) SetOpStatus(opID, status string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.opStatus[opID] = status
+}
+
 func (f *fakeUpstream) setRateLimited(v bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

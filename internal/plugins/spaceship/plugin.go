@@ -65,6 +65,7 @@ type repoStore interface {
 	ListPending(ctx context.Context, limit int) ([]*OperationRow, error)
 	MarkSuccess(ctx context.Context, id int64, result any) error
 	MarkFailed(ctx context.Context, id int64, errMsg string, result any) error
+	MarkPendingRetried(ctx context.Context, id int64) (bool, error)
 	UpdateOpDomain(ctx context.Context, opID, domainID int64) error
 	ListOperations(ctx context.Context, limit, offset int) ([]*OperationRow, error)
 	CountOperations(ctx context.Context) (int, error)

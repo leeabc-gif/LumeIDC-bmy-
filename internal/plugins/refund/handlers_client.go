@@ -49,16 +49,26 @@ func (p *Plugin) clientMyStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // clientEligibleOrders 可退订单 + 表单选项（方式/原因/上限/期限），供申请页一次性取数。
+//
+// 分页：?limit&offset，limit 默认 100，硬上限 maxEligibleLimit=500；超过上限会自动 clamp，
+// 避免客户端传 limit=100000 把整张 orders 表扫一遍。响应附带 has_more 让前端知道是否
+// 还有下一页（防"前 100 条看起来全可退结果后面还有"的游标陷阱）。
 func (p *Plugin) clientEligibleOrders(w http.ResponseWriter, r *http.Request) {
 	userID, ok := plugin.RequireUserID(w, r)
 	if !ok {
 		return
 	}
 	ctx := r.Context()
-	orders, err := p.requests.EligibleOrders(ctx, userID, p.cfgInt(ctx, "refundWindowDays", 7))
+	limit, offset := parseEligiblePage(r)
+	orders, err := p.requests.EligibleOrders(ctx, userID, p.cfgInt(ctx, "refundWindowDays", 7), limit+1, offset)
 	if err != nil {
 		plugin.JSONFail(w, "查询失败")
 		return
+	}
+	hasMore := false
+	if len(orders) > limit {
+		hasMore = true
+		orders = orders[:limit]
 	}
 	globalMethods := p.cfgList(ctx, "refundMethods", defMethods)
 	now := time.Now()
@@ -96,7 +106,41 @@ func (p *Plugin) clientEligibleOrders(w http.ResponseWriter, r *http.Request) {
 	out := p.clientOptions(ctx)
 	out["ok"] = 1
 	out["orders"] = list
+	out["has_more"] = hasMore
+	out["limit"] = limit
+	out["offset"] = offset
 	plugin.WriteJSON(w, out)
+}
+
+// maxEligibleLimit 可退订单接口单次硬上限。即便客户端传 limit=1_000_000，我们也只
+// 给 500 条（多 1 用于探测 has_more），并附 has_more=true —— 防"内存 DoS / DB 扫描
+// 整张 orders 表"。同时也是单页 UX 的合理上界。
+const maxEligibleLimit = 500
+
+// defaultEligibleLimit 前端默认拉多少（与历史行为一致：100）。
+const defaultEligibleLimit = 100
+
+// parseEligiblePage 把 ?limit&offset 解析成安全的分页参数。负数 / 超大都会被 clamp。
+func parseEligiblePage(r *http.Request) (limit, offset int) {
+	limit = defaultEligibleLimit
+	offset = 0
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := strings.TrimSpace(r.URL.Query().Get("offset")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+	if limit > maxEligibleLimit {
+		limit = maxEligibleLimit
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	return limit, offset
 }
 
 // withinProductWindow 按商品规则的窗口类型/数值判断订单是否在可退期限内。

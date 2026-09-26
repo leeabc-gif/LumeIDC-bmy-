@@ -407,6 +407,23 @@ func (r *Repo) MarkFailed(ctx context.Context, id int64, errMsg string, result a
 	return err
 }
 
+// MarkPendingRetried 把 pending 操作的时间窗复位为 now()。ListPending 只挑
+// "started_at > now() - 15min" 的 pending，cron 因此会丢弃卡死操作；管理员
+// 显式 retry 应能把操作重新放回窗口，让下一轮 cron 也能正常拣到再轮询。
+// 返回 true 表示确实改到了一条 pending 记录（终态记录不会被"复活"）。
+func (r *Repo) MarkPendingRetried(ctx context.Context, id int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE plugin_spaceship_operations SET started_at=now() WHERE id=$1 AND status='pending'`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // UpdateOpDomain 注册成功后把 domain_id 关联上（CreateOperation 时 domain_id 还未知）。
 func (r *Repo) UpdateOpDomain(ctx context.Context, opID, domainID int64) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE plugin_spaceship_operations SET domain_id=$1 WHERE id=$2`, domainID, opID)

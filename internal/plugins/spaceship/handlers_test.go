@@ -740,6 +740,69 @@ func TestP1_Retry_TerminalOperationMustBeRejected(t *testing.T) {
 	}
 }
 
+// 卡死 pending 操作可由管理员手动复活：started_at 被复位到 now()，下一次 cron 即便
+// 现在跑也能拣到；同时 pollOne 立刻拉一次把"上游其实早成功了"的状态落库。
+func TestP1_Retry_CanResurrectStuckPending(t *testing.T) {
+	up := newFakeUpstream()
+	defer up.Close()
+	withFakeUpstream(t, up)
+	p, d := newTestPlugin(t, up, nil)
+
+	uid := createTestUser(t, d, "stuck", "100.00")
+	_ = uid
+
+	// 注册接口会进注册路径；这里只要个 pending op —— 直接 SQL 插。
+	const opIDStr = "op-stuck-1"
+	stuckAt := time.Now().Add(-30 * time.Minute) // 远在 15min 窗口外
+	var opID int64
+	if err := d.QueryRowContext(context.Background(),
+		`INSERT INTO plugin_spaceship_operations (operation_id,domain,op_type,status,started_at)
+		 VALUES($1,'stuck-p1.com','domain_create','pending',$2) RETURNING id`, opIDStr, stuckAt).Scan(&opID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.ExecContext(context.Background(), `DELETE FROM plugin_spaceship_operations WHERE id=$1`, opID)
+	})
+
+	// 第一次 GET /v1/async-operations/op-stuck-1：服务端拿到的是 pending（卡死），
+	// 但此时 fakeUpstream 这边"其实已经注册成功了"。先布置上游状态。
+	up.SetOpStatus(opIDStr, "success")
+
+	// retry 前断言 started_at 仍是卡死远点
+	var pre time.Time
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT started_at FROM plugin_spaceship_operations WHERE id=$1`, opID).Scan(&pre); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(pre) < 15*time.Minute {
+		t.Fatalf("测试前置条件失败：started_at 应该 >15min 之前，got %s", pre)
+	}
+
+	r := httptest.NewRequest(http.MethodPost, "/operations/1/retry", strings.NewReader(`{}`))
+	r.SetPathValue("id", fmt.Sprint(opID))
+	_, res := call(p.adminRetryOperation, withAdmin(r))
+	if res["ok"] != float64(1) {
+		t.Fatalf("P1 复活：卡死 pending 未能 retry，body=%v", res)
+	}
+
+	// 1) 数据库层面 started_at 已被复位到近 1 分钟内
+	var postStarted time.Time
+	var postStatus string
+	var postError sql.NullString
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT started_at,status,error_msg FROM plugin_spaceship_operations WHERE id=$1`, opID).
+		Scan(&postStarted, &postStatus, &postError); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(postStarted) > 1*time.Minute {
+		t.Errorf("P1 复活：started_at 未被复位到 now() 附近，got %s", postStarted)
+	}
+	// 2) 立刻 pollOne 把上游 success 状态落库：status 应该变 success
+	if postStatus != "success" {
+		t.Errorf("P1 复活：pollOne 未把上游 success 落库，status=%s err=%v", postStatus, postError)
+	}
+}
+
 // =====================================================================
 // 联系人可见性：共享模板对用户可见但必须标注 shared（只读），后台列表同理
 // =====================================================================

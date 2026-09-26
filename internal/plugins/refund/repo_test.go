@@ -248,7 +248,7 @@ func TestEligibleOrders(t *testing.T) {
 	ctx := context.Background()
 	reqs := f.requests()
 
-	orders, err := reqs.EligibleOrders(ctx, f.userID, 7)
+	orders, err := reqs.EligibleOrders(ctx, f.userID, 7, 100, 0)
 	if err != nil || len(orders) != 1 || orders[0].ID != f.orderID {
 		t.Fatalf("已支付订单应可退: %+v err=%v", orders, err)
 	}
@@ -260,7 +260,7 @@ func TestEligibleOrders(t *testing.T) {
 	if _, err := reqs.Create(ctx, &Request{OrderID: f.orderID, UserID: f.userID, Amount: "10.00", Reason: "不想要了", Method: "balance", Status: statusPending}); err != nil {
 		t.Fatal(err)
 	}
-	orders, err = reqs.EligibleOrders(ctx, f.userID, 7)
+	orders, err = reqs.EligibleOrders(ctx, f.userID, 7, 100, 0)
 	if err != nil || len(orders) != 0 {
 		t.Fatalf("有进行中申请应排除: %+v err=%v", orders, err)
 	}
@@ -272,11 +272,11 @@ func TestEligibleOrders(t *testing.T) {
 	if _, err := f.db.ExecContext(ctx, `UPDATE orders SET paid_at=now()-interval '30 days' WHERE id=$1`, f.orderID); err != nil {
 		t.Fatal(err)
 	}
-	orders, err = reqs.EligibleOrders(ctx, f.userID, 7)
+	orders, err = reqs.EligibleOrders(ctx, f.userID, 7, 100, 0)
 	if err != nil || len(orders) != 0 {
 		t.Fatalf("超期限应排除: %+v err=%v", orders, err)
 	}
-	orders, err = reqs.EligibleOrders(ctx, f.userID, 0)
+	orders, err = reqs.EligibleOrders(ctx, f.userID, 0, 100, 0)
 	if err != nil || len(orders) != 1 {
 		t.Fatalf("不限期限应保留: %+v err=%v", orders, err)
 	}
@@ -287,9 +287,64 @@ func TestEligibleOrders(t *testing.T) {
 		f.userID, f.orderID); err != nil {
 		t.Fatal(err)
 	}
-	orders, err = reqs.EligibleOrders(ctx, f.userID, 0)
+	orders, err = reqs.EligibleOrders(ctx, f.userID, 0, 100, 0)
 	if err != nil || len(orders) != 0 {
 		t.Fatalf("已退满应排除: %+v err=%v", orders, err)
+	}
+}
+
+// P1：EligibleOrders 必须支持分页 + limit 参数化，handler 之前硬编码 LIMIT 100 会让
+// 历史订单超过 100 条的用户看不到后面仍有可退订单 —— 这是体验断崖级 P1。
+func TestEligibleOrders_PaginationAndLimit(t *testing.T) {
+	f := setupRefundDB(t)
+	ctx := context.Background()
+	reqs := f.requests()
+
+	// 制造 5 条额外订单（前 setupRefundDB 中已有 1 条 f.orderID），都为可退状态。
+	for i := 0; i < 5; i++ {
+		if _, err := f.db.ExecContext(ctx,
+			`INSERT INTO orders(user_id,product_id,amount,cycle,status,paid_at) VALUES($1,$2,'10.00','month',1,now())`,
+			f.userID, f.productID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1) limit=2：应只返 2 条；ID DESC 排序，最新插入的优先。
+	page1, err := reqs.EligibleOrders(ctx, f.userID, 0, 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1) != 2 {
+		t.Fatalf("limit=2 应返 2 条，got %d", len(page1))
+	}
+	if page1[0].ID <= page1[1].ID {
+		t.Fatalf("应按 ID DESC 排序，got %d, %d", page1[0].ID, page1[1].ID)
+	}
+
+	// 2) offset=2 limit=2：下一页又是 2 条；ID 与 page1 完全不重叠。
+	page2, err := reqs.EligibleOrders(ctx, f.userID, 0, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2) != 2 {
+		t.Fatalf("offset=2 limit=2 应返 2 条，got %d", len(page2))
+	}
+	seen := map[int64]bool{page1[0].ID: true, page1[1].ID: true}
+	if seen[page2[0].ID] || seen[page2[1].ID] {
+		t.Fatalf("offset 分页结果应与 page1 不重叠: page1=%v page2=%v", page1, page2)
+	}
+
+	// 3) limit=10000 应被 repo 自己夹回 >=1，handler 会再夹到硬上限 500：单元层只验
+	//    repo 不会再被任何调用方逼着一次性 OOM。即 limit=1 仍是合法的。
+	oneOnly, err := reqs.EligibleOrders(ctx, f.userID, 0, 1, 0)
+	if err != nil || len(oneOnly) != 1 {
+		t.Fatalf("limit=1 应返 1 条: %+v err=%v", oneOnly, err)
+	}
+
+	// 4) 负 offset / 负 limit：repo 自身 clamp 到合理值，不应 panic。
+	_, err = reqs.EligibleOrders(ctx, f.userID, 0, -50, -5)
+	if err != nil {
+		t.Fatalf("负 limit/offset 应被 clamp，而不是报错: %v", err)
 	}
 }
 

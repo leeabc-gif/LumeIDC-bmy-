@@ -150,6 +150,11 @@ func (p *Plugin) adminApprove(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if allowed, retry := p.checkAdminRate(r, sess.UserID, "approve"); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		plugin.StatusFail(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
+		return
+	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		plugin.StatusFail(w, 400, "参数错误")
@@ -182,6 +187,11 @@ func (p *Plugin) adminReject(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, ok := plugin.AdminSession(w, r)
 	if !ok {
+		return
+	}
+	if allowed, retry := p.checkAdminRate(r, sess.UserID, "reject"); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		plugin.StatusFail(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
