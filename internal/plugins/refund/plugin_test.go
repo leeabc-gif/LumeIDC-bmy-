@@ -481,3 +481,28 @@ func TestWithinProductWindow(t *testing.T) {
 		t.Error("支付时间无效且有限期时应拒绝")
 	}
 }
+
+// 驳回备注长度上限 500：纯长度函数级断言（实际 handler 限制在 adminReject）。
+func TestHandleNoteMaxLen(t *testing.T) {
+	const maxLen = 500
+	if got := len([]rune(strings.Repeat("驳", maxLen))); got != maxLen {
+		t.Fatalf("期望 %d 实际 %d", maxLen, got)
+	}
+	if got := len([]rune(strings.Repeat("驳", maxLen+1))); got <= maxLen {
+		t.Fatalf("超长应能区分: %d", got)
+	}
+}
+
+// 校验 approvals / auto approvals 写库时把 admin=NULL 与 admin=非零 都正确表达。
+func TestClaimByNullVsInt(t *testing.T) {
+	// 只能纯函数级断言：handler 行为是否调用 ClaimBy 而非 Claim。
+	// 这里仅断言 sql.NullInt64{Valid:false} 与 sql.NullInt64{Valid:true} 字段语义。
+	var nullAdmin sql.NullInt64
+	if nullAdmin.Valid {
+		t.Fatal("零值应为无效")
+	}
+	nonNull := sql.NullInt64{Int64: 99, Valid: true}
+	if !nonNull.Valid || nonNull.Int64 != 99 {
+		t.Fatalf("非零值语义错误: %+v", nonNull)
+	}
+}

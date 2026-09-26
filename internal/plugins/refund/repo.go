@@ -97,6 +97,20 @@ func (r *Requests) Claim(ctx context.Context, id int64, status string, adminID i
 	return n > 0, err
 }
 
+// ClaimBy 与 Claim 等价，但处理人支持 NULL（系统自动通过场景：无人值守时写 NULL 区别于 0/未知）。
+func (r *Requests) ClaimBy(ctx context.Context, id int64, status string, adminID sql.NullInt64, note string) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE plugin_refund_requests
+		 SET status=$2,handled_by=$3,handled_at=now(),handle_note=$4,updated_at=now()
+		 WHERE id=$1 AND status='pending'`,
+		id, status, adminID, note)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // Reopen 退款执行失败回滚为 pending（保留申请痕迹可重试）。
 func (r *Requests) Reopen(ctx context.Context, id int64) error {
 	_, err := r.db.ExecContext(ctx,
@@ -110,6 +124,36 @@ func (r *Requests) SetRefundID(ctx context.Context, id, refundID int64) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE plugin_refund_requests SET refund_id=$2,updated_at=now() WHERE id=$1`, id, refundID)
 	return err
+}
+
+// AttachRefundID 在单事务中以 FOR UPDATE 取最新 refunds.id 并写入 plugin_refund_requests，
+// 消除"取最新ID → 写回"之间的并发空隙（避免错拿/覆盖其他请求的退款单）。
+func (r *Requests) AttachRefundID(ctx context.Context, id, orderID int64) (int64, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var refundID sql.NullInt64
+	if err := tx.QueryRowContext(ctx,
+		`SELECT id FROM refunds WHERE order_id=$1 ORDER BY id DESC FOR UPDATE`, orderID).Scan(&refundID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if !refundID.Valid {
+		return 0, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE plugin_refund_requests SET refund_id=$2,updated_at=now() WHERE id=$1`,
+		id, refundID.Int64); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return refundID.Int64, nil
 }
 
 // UpdateAmount 回写实际退款金额（如扣除手续费后与申请金额不一致）。

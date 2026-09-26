@@ -89,28 +89,44 @@ func pageParam(q url.Values) (page, limit int) {
 }
 
 // recordItem 记录 JSON 视图（admin=true 附带邮箱/处理人/备注）。
+// 非 admin 视图：description 截断到 200 字避免长文展示；evidence_url 不外泄（多为后台内部凭据）。
 func recordItem(r RecordAdminRow, admin bool) map[string]any {
 	m := map[string]any{
-		"id":           r.ID,
-		"user_id":      r.UserID,
-		"user_name":    r.UserName,
-		"type":         r.Type,
-		"level":        r.Level,
-		"level_label":  levelLabels[r.Level],
-		"description":  r.Description,
-		"evidence_url": r.EvidenceURL,
-		"action":       r.Action,
-		"public":       r.Public,
-		"starts_at":    fmtTime(r.StartsAt),
-		"expires_at":   fmtTime(r.ExpiresAt),
-		"created_at":   r.CreatedAt.Format("2006-01-02 15:04"),
+		"id":          r.ID,
+		"user_id":     r.UserID,
+		"user_name":   r.UserName,
+		"type":        r.Type,
+		"level":       r.Level,
+		"level_label": levelLabels[r.Level],
+		"public":      r.Public,
+		"starts_at":   fmtTime(r.StartsAt),
+		"expires_at":  fmtTime(r.ExpiresAt),
+		"created_at":  r.CreatedAt.Format("2006-01-02 15:04"),
 	}
 	if admin {
 		m["user_email"] = r.UserEmail
 		m["handled_by"] = r.HandledBy
 		m["note"] = r.Note
+		m["description"] = r.Description
+		m["evidence_url"] = r.EvidenceURL
+		m["action"] = r.Action
+	} else {
+		m["description"] = truncateText(r.Description, 200)
+		m["action"] = r.Action
 	}
 	return m
+}
+
+// truncateText 截断正文（按 rune），超出加省略号；空串原样返回。
+func truncateText(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	rs := []rune(s)
+	if len(rs) <= max {
+		return s
+	}
+	return string(rs[:max]) + "…"
 }
 
 // announcementItem 公告 JSON 视图。
@@ -191,33 +207,41 @@ func (p *Plugin) adminUserSearch(w http.ResponseWriter, r *http.Request) {
 	plugin.WriteJSON(w, map[string]any{"ok": 1, "list": list})
 }
 
-// adminForm 表单数据：id 空=新增（仅选项），非空=回填记录。
+// adminForm 表单数据：id 空/0=新增（仅选项），非空=回填记录。
 func (p *Plugin) adminForm(w http.ResponseWriter, r *http.Request) {
 	if !plugin.AdminOK(w, r) {
 		return
 	}
 	out := map[string]any{"ok": 1, "item": map[string]any{}, "options": p.formOptions(r.Context())}
-	if id, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("id")), 10, 64); err == nil && id > 0 {
-		rec, err := p.records.Get(r.Context(), id)
-		if err != nil {
-			plugin.JSONFail(w, "查询失败")
-			return
-		}
-		if rec == nil {
-			plugin.JSONFail(w, "记录不存在")
-			return
-		}
-		usr, err := p.users.Get(r.Context(), rec.UserID)
-		if err != nil {
-			plugin.JSONFail(w, "查询失败")
-			return
-		}
-		if usr == nil {
-			plugin.JSONFail(w, "用户不存在")
-			return
-		}
-		out["item"] = recordItem(RecordAdminRow{Record: *rec, UserName: usr.Name, UserEmail: usr.Email}, true)
+	raw := strings.TrimSpace(r.URL.Query().Get("id"))
+	if raw == "" {
+		plugin.WriteJSON(w, out)
+		return
 	}
+	id, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || id <= 0 {
+		plugin.StatusFail(w, 400, "参数错误")
+		return
+	}
+	rec, err := p.records.Get(r.Context(), id)
+	if err != nil {
+		plugin.JSONFail(w, "查询失败")
+		return
+	}
+	if rec == nil {
+		plugin.JSONFail(w, "记录不存在")
+		return
+	}
+	usr, err := p.users.Get(r.Context(), rec.UserID)
+	if err != nil {
+		plugin.JSONFail(w, "查询失败")
+		return
+	}
+	if usr == nil {
+		plugin.JSONFail(w, "用户不存在")
+		return
+	}
+	out["item"] = recordItem(RecordAdminRow{Record: *rec, UserName: usr.Name, UserEmail: usr.Email}, true)
 	plugin.WriteJSON(w, out)
 }
 
@@ -230,7 +254,23 @@ func (p *Plugin) adminSave(w http.ResponseWriter, r *http.Request) {
 		plugin.JSONFail(w, "请求格式错误")
 		return
 	}
-	id, _ := strconv.ParseInt(strings.TrimSpace(vals["id"]), 10, 64)
+	id, err := strconv.ParseInt(strings.TrimSpace(vals["id"]), 10, 64)
+	if err != nil || id < 0 {
+		plugin.StatusFail(w, 400, "记录参数错误")
+		return
+	}
+	if id > 0 {
+		// 编辑模式：先确认记录存在再 Update，避免对不存在行返回 ok=1 的静默成功。
+		old, gerr := p.records.Get(r.Context(), id)
+		if gerr != nil {
+			plugin.JSONFail(w, "查询失败")
+			return
+		}
+		if old == nil {
+			plugin.JSONFail(w, "记录不存在")
+			return
+		}
+	}
 	userID, err := strconv.ParseInt(strings.TrimSpace(vals["user_id"]), 10, 64)
 	if err != nil || userID <= 0 {
 		plugin.StatusFail(w, 400, "请选择用户")
@@ -323,8 +363,18 @@ func (p *Plugin) adminDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
+	if err != nil || id <= 0 {
 		plugin.StatusFail(w, 400, "参数错误")
+		return
+	}
+	// 先确认存在再 Delete，避免对不存在行返回 ok=1 的静默成功。
+	rec, gerr := p.records.Get(r.Context(), id)
+	if gerr != nil {
+		plugin.JSONFail(w, "查询失败")
+		return
+	}
+	if rec == nil {
+		plugin.JSONFail(w, "记录不存在")
 		return
 	}
 	if err := p.records.Delete(r.Context(), id); err != nil {

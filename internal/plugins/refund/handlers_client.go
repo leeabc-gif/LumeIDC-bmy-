@@ -321,7 +321,7 @@ func (p *Plugin) clientCreate(w http.ResponseWriter, r *http.Request) {
 	if shouldAutoApprove(reviewMode, autoMaxCents, amountCents) {
 		req, gerr := p.requests.Get(ctx, id)
 		if gerr == nil && req != nil {
-			if msg := p.approveFlow(ctx, req, 0); msg != "" {
+			if msg := p.approveFlow(ctx, req, sql.NullInt64{}); msg != "" {
 				plugin.WriteJSON(w, map[string]any{"ok": 1, "status": statusPending, "message": "已提交，等待人工审核"})
 				return
 			}

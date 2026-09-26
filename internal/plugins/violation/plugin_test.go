@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -124,15 +125,17 @@ func TestContains(t *testing.T) {
 	}
 }
 
-// 前台视图不得外泄邮箱/备注/处理人；等级必须有中文标签。
+// 前台视图不得外泄邮箱/备注/处理人/凭据 URL；等级必须有中文标签；
+// 长 description 必须截断以保护展示页；admin 视图必须看到全部字段。
 func TestRecordItemAdminKeys(t *testing.T) {
+	longDesc := strings.Repeat("啊", 500)
 	row := RecordAdminRow{
-		Record:    Record{ID: 1, UserID: 2, Level: "severe", Type: "垃圾邮件", HandledBy: 9, Note: "内部备注"},
-		UserName:  "小明",
-		UserEmail: "a@b.c",
+		Record:     Record{ID: 1, UserID: 2, Level: "severe", Type: "垃圾邮件", HandledBy: 9, Note: "内部备注", Description: longDesc, EvidenceURL: "https://internal.example/secret"},
+		UserName:   "小明",
+		UserEmail:  "a@b.c",
 	}
 	public := recordItem(row, false)
-	for _, k := range []string{"user_email", "note", "handled_by"} {
+	for _, k := range []string{"user_email", "note", "handled_by", "evidence_url"} {
 		if _, ok := public[k]; ok {
 			t.Fatalf("前台视图不应含 %q", k)
 		}
@@ -140,11 +143,44 @@ func TestRecordItemAdminKeys(t *testing.T) {
 	if public["level_label"] != "严重" {
 		t.Fatalf("等级标签错误: %v", public["level_label"])
 	}
+	pd, _ := public["description"].(string)
+	if len([]rune(pd)) > 201 { // 200 字 + "…" 省略号
+		t.Fatalf("前台 description 未截断：len=%d", len([]rune(pd)))
+	}
+	if !strings.HasSuffix(pd, "…") {
+		t.Fatalf("前台 description 应以省略号结尾: %q", pd)
+	}
 	admin := recordItem(row, true)
-	for _, k := range []string{"user_email", "note", "handled_by"} {
+	for _, k := range []string{"user_email", "note", "handled_by", "evidence_url"} {
 		if _, ok := admin[k]; !ok {
 			t.Fatalf("后台视图应含 %q", k)
 		}
+	}
+	if admin["description"] != longDesc {
+		t.Fatalf("后台 description 应保留原文")
+	}
+}
+
+// truncateText 边界：空串、超限、不超限、max<=0。
+func TestTruncateText(t *testing.T) {
+	cases := []struct {
+		in   string
+		max  int
+		want string
+	}{
+		{"", 5, ""},
+		{"abc", 5, "abc"},
+		{"abc", 3, "abc"},
+		{"abcdef", 3, "abc…"},
+		{"中文汉字超限", 2, "中文…"},
+		{"hi", 0, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.in+"|"+strconv.Itoa(c.max), func(t *testing.T) {
+			if got := truncateText(c.in, c.max); got != c.want {
+				t.Fatalf("truncateText(%q,%d) = %q want %q", c.in, c.max, got, c.want)
+			}
+		})
 	}
 }
 
