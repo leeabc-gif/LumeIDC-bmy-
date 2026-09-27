@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"lumeidc/internal/plugin"
 )
@@ -47,6 +49,30 @@ type Plugin struct {
 	records *Records
 	anns    *Announcements
 	users   *Users
+	// adminLimiter 管理端危险操作限流器（按 adminID|IP|op 三重键；懒加载）。
+	// 防脚本批量点击 / 误操作刷量；纯内存无外部依赖，语义见 plugin.RateLimiter。
+	adminLimiterOnce sync.Once
+	adminLimiter     *plugin.RateLimiter
+}
+
+func (p *Plugin) limiter() *plugin.RateLimiter {
+	p.adminLimiterOnce.Do(func() {
+		p.adminLimiter = plugin.NewRateLimiter()
+	})
+	return p.adminLimiter
+}
+
+// checkAdminRate 管理端危险操作统一节流闸门（保存/删除等共用）。
+// 限流强度取插件配置 adminOpRatePerMin（<=0 表示关闭，本地开发/单管理员机房）；
+// 键为 <adminID>|<ip>|<op>，限额语义详见 plugin.RateLimiter.AllowAdmin。
+func (p *Plugin) checkAdminRate(r *http.Request, adminID int64, op string) (bool, time.Duration) {
+	rate := 30
+	if v := strings.TrimSpace(p.host.Config(r.Context(), "adminOpRatePerMin")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			rate = n
+		}
+	}
+	return p.limiter().AllowAdmin(r, rate, adminID, op)
 }
 
 func (p *Plugin) Info() plugin.Info {

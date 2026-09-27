@@ -471,7 +471,13 @@ func (p *Plugin) adminPrivacy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Plugin) adminDeleteDomain(w http.ResponseWriter, r *http.Request) {
-	if !plugin.AdminOK(w, r) {
+	sess, ok := plugin.AdminSession(w, r)
+	if !ok {
+		return
+	}
+	if allowed, retry := p.checkAdminRate(r, sess.UserID, "delete"); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		plugin.StatusFail(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
 	id, err := readID(r, "id")
@@ -718,8 +724,15 @@ func (p *Plugin) adminListOperations(w http.ResponseWriter, r *http.Request) {
 //   - pending 但已超过 15 分钟窗口（ListPending 已主动丢弃），先把 started_at 重新置为 now()
 //     让下一次 cron 还能拣到，然后 pollOne 立刻拉一次 —— 这是"卡死复活"语义。
 //   - pending 且仍在窗口内，只走一次 pollOne 即可，不动时间戳。
+//   - 入口按 <adminID>|<ip>|retry 限流（默认 30 次/分钟），防连点打爆上游。
 func (p *Plugin) adminRetryOperation(w http.ResponseWriter, r *http.Request) {
-	if !plugin.AdminOK(w, r) {
+	sess, ok := plugin.AdminSession(w, r)
+	if !ok {
+		return
+	}
+	if allowed, retry := p.checkAdminRate(r, sess.UserID, "retry"); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		plugin.StatusFail(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
 	id, err := readID(r, "id")

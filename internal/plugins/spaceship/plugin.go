@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"lumeidc/internal/plugin"
@@ -53,6 +54,17 @@ func init() {
 type Plugin struct {
 	host *plugin.Host
 	repo repoStore
+	// adminLimiter 管理端危险操作限流器（按 adminID|IP|op 三重键；懒加载）。
+	// 防脚本批量点击 / 误操作刷量；纯内存无外部依赖，语义见 plugin.RateLimiter。
+	adminLimiterOnce sync.Once
+	adminLimiter     *plugin.RateLimiter
+}
+
+func (p *Plugin) limiter() *plugin.RateLimiter {
+	p.adminLimiterOnce.Do(func() {
+		p.adminLimiter = plugin.NewRateLimiter()
+	})
+	return p.adminLimiter
 }
 
 // repoStore Spaceship 数据访问接口。*Repo 为唯一生产实现（Init 注入）；
@@ -227,6 +239,16 @@ func (p *Plugin) cfgClient(ctx context.Context) *Client {
 		return nil
 	}
 	return newClient(k, s)
+}
+
+// ---- 管理端危险操作限流（防刷 / 防误操作） ----
+
+// checkAdminRate 管理端危险操作统一节流闸门（重试/删除等共用）。
+// 限流强度取插件配置 adminOpRatePerMin（<=0 表示关闭，本地开发/单管理员机房）；
+// 键为 <adminID>|<ip>|<op>，限额语义详见 plugin.RateLimiter.AllowAdmin。
+func (p *Plugin) checkAdminRate(r *http.Request, adminID int64, op string) (bool, time.Duration) {
+	rate := p.cfgInt(r.Context(), "adminOpRatePerMin", 30)
+	return p.limiter().AllowAdmin(r, rate, adminID, op)
 }
 
 // ---- Cron 轮询（CronContributor 可选接口） ----

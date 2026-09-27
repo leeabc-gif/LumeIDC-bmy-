@@ -246,7 +246,13 @@ func (p *Plugin) adminForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Plugin) adminSave(w http.ResponseWriter, r *http.Request) {
-	if !plugin.AdminOK(w, r) {
+	sess, ok := plugin.AdminSession(w, r)
+	if !ok {
+		return
+	}
+	if allowed, retry := p.checkAdminRate(r, sess.UserID, "save"); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		plugin.StatusFail(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
 	vals, err := parseFormValues(r)
@@ -322,10 +328,6 @@ func (p *Plugin) adminSave(w http.ResponseWriter, r *http.Request) {
 		plugin.StatusFail(w, 400, "过期时间必须晚于生效时间")
 		return
 	}
-	sess, ok := plugin.AdminSession(w, r)
-	if !ok {
-		return
-	}
 	rec := &Record{
 		ID:          id,
 		UserID:      userID,
@@ -359,7 +361,13 @@ func (p *Plugin) adminSave(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Plugin) adminDelete(w http.ResponseWriter, r *http.Request) {
-	if !plugin.AdminOK(w, r) {
+	sess, ok := plugin.AdminSession(w, r)
+	if !ok {
+		return
+	}
+	if allowed, retry := p.checkAdminRate(r, sess.UserID, "delete"); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		plugin.StatusFail(w, http.StatusTooManyRequests, "操作过于频繁，请稍后再试")
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
