@@ -3,6 +3,7 @@
 package violation
 
 import (
+	"context"
 	"embed"
 	"io/fs"
 	"net/http"
@@ -113,7 +114,18 @@ func (p *Plugin) ConfigSchema() []plugin.ConfigField {
 			Default: "警告\n限制功能\n暂停服务\n停用账户", Tip: "每行一个措施；仅记录展示，不联动账户状态"},
 		{Key: "defaultPublic", Title: "新增时默认公示", Type: "switch", Default: "0",
 			Tip: "添加违规表单中「是否公示」的默认值"},
+		{Key: "notifyUser", Title: "通知用户", Type: "switch", Default: "1",
+			Tip: "新增/实质变更违规记录时向对应用户发送站内信；开启邮件转发的站点将同步补发"},
 	}
+}
+
+// cfgBool 开关配置解析：空串（未配置）回退默认值，""/"0"/"false" 为 false，其余 true。
+func (p *Plugin) cfgBool(ctx context.Context, key string, def bool) bool {
+	v := strings.TrimSpace(p.host.Config(ctx, key))
+	if v == "" {
+		return def
+	}
+	return parseBool(v)
 }
 
 func (p *Plugin) RegisterAdminRoutes(mux *http.ServeMux) {

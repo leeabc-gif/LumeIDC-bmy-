@@ -265,17 +265,19 @@ func (p *Plugin) adminSave(w http.ResponseWriter, r *http.Request) {
 		plugin.StatusFail(w, 400, "记录参数错误")
 		return
 	}
+	var old *Record
 	if id > 0 {
 		// 编辑模式：先确认记录存在再 Update，避免对不存在行返回 ok=1 的静默成功。
-		old, gerr := p.records.Get(r.Context(), id)
+		got, gerr := p.records.Get(r.Context(), id)
 		if gerr != nil {
 			plugin.JSONFail(w, "查询失败")
 			return
 		}
-		if old == nil {
+		if got == nil {
 			plugin.JSONFail(w, "记录不存在")
 			return
 		}
+		old = got
 	}
 	userID, err := strconv.ParseInt(strings.TrimSpace(vals["user_id"]), 10, 64)
 	if err != nil || userID <= 0 {
@@ -347,6 +349,10 @@ func (p *Plugin) adminSave(w http.ResponseWriter, r *http.Request) {
 			plugin.JSONFail(w, "保存失败")
 			return
 		}
+		// 仅实质变化（等级/措施/有效期等）才打扰用户，改错别字不发通知。
+		if changes := materialChange(old, rec); len(changes) > 0 {
+			p.notifyUser(r.Context(), rec.UserID, notifyTitleUpdated, violationUpdatedBody(rec.ID, changes))
+		}
 	} else {
 		newID, err := p.records.Create(r.Context(), rec)
 		if err != nil {
@@ -356,6 +362,7 @@ func (p *Plugin) adminSave(w http.ResponseWriter, r *http.Request) {
 		plugin.Emit(r.Context(), EventViolationCreated, ViolationPayload{
 			RecordID: newID, UserID: rec.UserID, Type: rec.Type, Level: rec.Level,
 		})
+		p.notifyUser(r.Context(), rec.UserID, notifyTitleCreated, violationCreatedBody(rec))
 	}
 	plugin.WriteJSON(w, map[string]any{"ok": 1})
 }
@@ -390,6 +397,8 @@ func (p *Plugin) adminDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	plugin.Emit(r.Context(), EventViolationRemoved, ViolationPayload{RecordID: id})
+	// 撤销处罚同样要告知用户：处置不再生效，避免用户反复申诉。
+	p.notifyUser(r.Context(), rec.UserID, notifyTitleRemoved, violationRemovedBody(id))
 	plugin.WriteJSON(w, map[string]any{"ok": 1})
 }
 

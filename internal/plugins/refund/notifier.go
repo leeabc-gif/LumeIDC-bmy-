@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -70,16 +71,37 @@ func (p *Plugin) pushChannel(rawURL, kind, text string) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
 		log.Printf("[refund] %s webhook 构造失败: %v", kind, err)
+		p.alertChannelOnce(kind, err)
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("[refund] %s webhook 推送失败: %v", kind, err)
+		p.alertChannelOnce(kind, err)
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		log.Printf("[refund] %s webhook 响应异常: HTTP %d", kind, resp.StatusCode)
+		cause := fmt.Errorf("HTTP %d", resp.StatusCode)
+		log.Printf("[refund] %s webhook 响应异常: %s", kind, cause)
+		p.alertChannelOnce(kind, cause)
+	}
+}
+
+// alertChannelOnce 机器人渠道推送失败告警：webhook 配错、机器人被移出群、群容量满
+// 这类持续性故障此前只写服务器日志，站长无从知晓通知早已中断。这里按「渠道+日期」
+// 去重（同一天同一渠道只报一次），既不会因每单退款而刷屏，也不会彻底沉默。
+// 与 alertAdmin（退款单据后续处理失败）同属管理侧链路，不受用户开关控制。
+func (p *Plugin) alertChannelOnce(kind string, cause error) {
+	if p.host == nil || p.host.Notify == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), channelTimeout)
+	defer cancel()
+	key := fmt.Sprintf("refund_notify:%s:%s", kind, time.Now().Format("2006-01-02"))
+	body := fmt.Sprintf("退款通知推送失败（%s 渠道）：%v。请检查 webhook 地址、机器人是否仍在群内以及群容量限制。", kind, cause)
+	if err := p.host.Notify.NotifyAdminOnce(ctx, key, "退款通知", kind+" 渠道推送失败", body); err != nil {
+		log.Printf("[refund] %s 渠道失败告警发送失败: %v", kind, err)
 	}
 }
