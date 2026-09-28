@@ -260,10 +260,13 @@ func (p *Plugin) adminSave(w http.ResponseWriter, r *http.Request) {
 		plugin.JSONFail(w, "请求格式错误")
 		return
 	}
-	id, err := strconv.ParseInt(strings.TrimSpace(vals["id"]), 10, 64)
-	if err != nil || id < 0 {
-		plugin.StatusFail(w, 400, "记录参数错误")
-		return
+	id := int64(0)
+	if s := strings.TrimSpace(vals["id"]); s != "" {
+		id, err = strconv.ParseInt(s, 10, 64)
+		if err != nil || id < 0 {
+			plugin.StatusFail(w, 400, "记录参数错误")
+			return
+		}
 	}
 	var old *Record
 	if id > 0 {

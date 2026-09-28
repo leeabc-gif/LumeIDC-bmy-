@@ -17,6 +17,7 @@ type refundFixture struct {
 	db        *sql.DB
 	userID    int64
 	productID int64
+	psID      int64
 	orderID   int64
 }
 
@@ -49,7 +50,7 @@ func setupRefundDB(t *testing.T) *refundFixture {
 		d.Close()
 		t.Skipf("库中暂无价格组，跳过: %v", err)
 	}
-	f := &refundFixture{db: d}
+	f := &refundFixture{db: d, psID: psID}
 	if err := d.QueryRowContext(ctx,
 		`INSERT INTO users(email,password_hash) VALUES($1,'x') RETURNING id`,
 		fmt.Sprintf("refund_test_%d@example.com", time.Now().UnixNano())).Scan(&f.userID); err != nil {
@@ -75,9 +76,9 @@ func setupRefundDB(t *testing.T) *refundFixture {
 			q   string
 			arg int64
 		}{
-			{`DELETE FROM refunds WHERE order_id=$1`, f.orderID},
-			{`DELETE FROM plugin_refund_requests WHERE order_id=$1`, f.orderID},
-			{`DELETE FROM orders WHERE id=$1`, f.orderID},
+			{`DELETE FROM refunds WHERE user_id=$1`, f.userID},
+			{`DELETE FROM plugin_refund_requests WHERE user_id=$1`, f.userID},
+			{`DELETE FROM orders WHERE user_id=$1`, f.userID},
 			{`DELETE FROM products WHERE id=$1`, f.productID},
 			{`DELETE FROM users WHERE id=$1`, f.userID},
 		} {
@@ -303,8 +304,8 @@ func TestEligibleOrders_PaginationAndLimit(t *testing.T) {
 	// 制造 5 条额外订单（前 setupRefundDB 中已有 1 条 f.orderID），都为可退状态。
 	for i := 0; i < 5; i++ {
 		if _, err := f.db.ExecContext(ctx,
-			`INSERT INTO orders(user_id,product_id,amount,cycle,status,paid_at) VALUES($1,$2,'10.00','month',1,now())`,
-			f.userID, f.productID); err != nil {
+			`INSERT INTO orders(user_id,product_id,priceset_id,amount,cycle,status,paid_at) VALUES($1,$2,$3,'10.00','monthly',1,now())`,
+			f.userID, f.productID, f.psID); err != nil {
 			t.Fatal(err)
 		}
 	}
