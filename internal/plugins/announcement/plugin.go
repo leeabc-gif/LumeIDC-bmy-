@@ -13,7 +13,7 @@ import (
 	"lumeidc/internal/repo"
 )
 
-// Name 插件名常量（核心聚合点按此查启用态）。
+// Name 插件名常量。注意：核心聚合点（首页新闻区/铃铛）用字符串字面量按此名查启用态。
 const Name = "announcement"
 
 type Plugin struct {

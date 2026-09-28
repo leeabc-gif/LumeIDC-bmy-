@@ -39,12 +39,15 @@ func (p *Plugin) Init(h *plugin.Host) error {
 func init() { plugin.Register(&Plugin{}) }
 ```
 
-接线只有两处（组合根零改动）：
+接线最多两处（组合根零改动）：
 
 ```go
-// internal/plugins/all/all.go —— 加一行
+// internal/plugins/all/all.go —— 加一行（必有）
 _ "lumeidc/internal/plugins/hello"
 ```
+
+若插件带后台/前台页面，再到 `web/src/plugins/registry.ts` 的
+`adminRegistry`/`clientRegistry` 加一行组件映射（纯 API/事件类插件不需要）。
 
 构建启动后，后台「系统设置 → 插件管理」即可看到并可启停。
 
@@ -97,8 +100,11 @@ h.Subscribe("*", p.onAny)                                // 通配全部（含�
 事件目录（`plugin.EventCatalog()` 含中文标签，后台配置页自动列出）：
 `order.created / order.paid / invoice.expired / refund.created /
 service.created / service.suspended / service.unsuspended / service.renewed /
-service.terminated / user.registered / user.login / identity.submitted /
-identity.reviewed`，以及工单插件注册的 `ticket.opened / ticket.replied`。
+service.terminated / service.expiring / promotion.ending /
+user.registered / user.login / identity.submitted / identity.reviewed`，
+以及插件注册的 `ticket.opened / ticket.replied`（工单）、
+`refund_request.created / refund_request.approved / refund_request.rejected`（退款）、
+`violation.created / violation.removed`（违规）。
 payload 类型见 [events.go](../internal/plugin/events.go)。
 
 **语义**：Emit 同步广播；单个订阅者 panic/出错仅记日志，不阻断主流程；插件禁用后不投递。
@@ -150,6 +156,8 @@ func (p *Plugin) RegisterClientRoutes(mux *http.ServeMux) {
 ```
 
 - 子 mux 写**相对路径**；框架统一挂前缀并包启用态闸门（禁用即 404）
+- 方法限制：管理侧只挂 GET/POST/DELETE，用户侧只挂 GET/POST——PUT/PATCH 会 405，
+  写 handler 时就用这三种方法表达动作（如 `POST /{id}/close`）
 - 鉴权 helper：`plugin.AdminOK(w, r)` / `plugin.AdminSession(w, r)`（要管理员 ID 时）/
   `plugin.RequireUserID(w, r)`
 - 响应：`plugin.WriteJSON(w, {...})` 成功；`plugin.JSONFail(w, "中文原因")`（HTTP 200 + ok:0）；
@@ -198,9 +206,12 @@ func (p *Plugin) CronJobs() []plugin.CronJob {
 |---|---|
 | 事件/过滤器 | 不再投递/执行 |
 | 路由 | 404 |
-| 后台/前台菜单、挂件、注入 | 不显示 |
+| 后台/前台菜单、挂件、注入 | 不显示（后端过滤；已打开页面需刷新才消失） |
 | cron | 不触发 |
 | 数据表/配置 | 保留（重启用即恢复） |
+
+注：页面壳（`/admin#/plugin/{name}`、`/plugin/{name}`）本身不感知禁用态——
+菜单隐藏后手动输地址仍能打开壳，由 API 404 兜底报错，属可接受的固有局限。
 
 ## 十、故障策略与测试
 
@@ -218,8 +229,13 @@ func (p *Plugin) CronJobs() []plugin.CronJob {
 | `webhooknotify` | 事件通配订阅、配置 schema、管理路由、后台挂件、签名投递 |
 | `announcement` | 迁移建表、前后台 API、核心聚合点联动（启用态控制首页新闻区显隐） |
 | `tickets` | 复杂业务搬迁：前后台全套页面、cron 任务、通知模板触发、附件存储、自定义事件 |
+| `refund` | 复用核心能力（Host.Refunder）、商品级规则表、自定义事件、多渠道通知 |
+| `violation` | 公示页（前台公开路由）、跨插件复用公告仓储、记录生命周期事件 |
 | `dailyreport` | 最薄插件：纯配置 + cron + 管理员通知，零建表零前端 |
 | `spaceship` | 外部 API 客户端 + 异步注册轮询（cron）+ 前后台 CRUD + 迁移建表 + 余额扣减 |
+
+注：dailyreport 目前直接查 tickets 插件的表统计工单数（跨插件表耦合），
+tickets 禁用后日报仍会统计其历史工单——如需严格隔离请自行加启用态判断。
 
 ## 十二、接口类扩展：新增短信渠道
 

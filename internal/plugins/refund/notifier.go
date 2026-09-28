@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -70,15 +72,15 @@ func (p *Plugin) pushChannel(rawURL, kind, text string) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, bytes.NewReader(body))
 	if err != nil {
-		log.Printf("[refund] %s webhook 构造失败: %v", kind, err)
-		p.alertChannelOnce(kind, err)
+		log.Printf("[refund] %s webhook 构造失败: %v", kind, stripURLError(err))
+		p.alertChannelOnce(kind, stripURLError(err))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("[refund] %s webhook 推送失败: %v", kind, err)
-		p.alertChannelOnce(kind, err)
+		log.Printf("[refund] %s webhook 推送失败: %v", kind, stripURLError(err))
+		p.alertChannelOnce(kind, stripURLError(err))
 		return
 	}
 	defer resp.Body.Close()
@@ -104,4 +106,14 @@ func (p *Plugin) alertChannelOnce(kind string, cause error) {
 	if err := p.host.Notify.NotifyAdminOnce(ctx, key, "退款通知", kind+" 渠道推送失败", body); err != nil {
 		log.Printf("[refund] %s 渠道失败告警发送失败: %v", kind, err)
 	}
+}
+
+// stripURLError 剥离 *url.Error 携带的完整 URL（webhook 地址内含机器人密钥，
+// 不得随错误写入日志），只保留底层错误原因。
+func stripURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
 }

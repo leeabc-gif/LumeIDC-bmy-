@@ -349,7 +349,7 @@ func Build(cfg *config.Config, version string) (*App, error) {
 		if _, ok := pl.(plugin.ConfigSchemaProvider); ok {
 			adminSub = http.NewServeMux()
 			// 配置 schema 统一读写 API（插件零 handler 获得配置页）
-			cfgH := &handler.AdminPluginConfig{Settings: settingsRepo, Name: name, Schema: pl.(plugin.ConfigSchemaProvider).ConfigSchema()}
+			cfgH := &handler.AdminPluginConfig{Settings: settingsRepo, AdminLog: adminLog, Name: name, Schema: pl.(plugin.ConfigSchemaProvider).ConfigSchema()}
 			adminSub.HandleFunc("GET /config", cfgH.Get)
 			adminSub.HandleFunc("POST /config", cfgH.Save)
 		}
@@ -380,7 +380,7 @@ func Build(cfg *config.Config, version string) (*App, error) {
 			}
 		}
 	}
-	(&handler.AdminPlugins{}).Register(mux)
+	(&handler.AdminPlugins{AdminLog: adminLog}).Register(mux)
 	registerHealthRoutes(mux, database)
 	// Vite SPA 静态资源与文档兜底（GET 未命中任意 SSR/API 路由时）。
 	// "GET /{path...}" 比 "/" 更精确，GET 未知路径交给 SPA；其余方法仍走渲染 404。

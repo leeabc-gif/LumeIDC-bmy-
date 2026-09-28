@@ -24,6 +24,8 @@ func TestValidAdminPath(t *testing.T) {
 		{in: "/a/b", want: false},      // 多段
 		{in: "/login", want: false},    // 保留路由
 		{in: "/services", want: false}, // 保留路由
+		{in: "/plugin", want: false},   // 插件路由前缀
+		{in: "/plugins", want: false},  // 插件公开端点前缀
 		{in: "/manage/", want: false},  // 尾斜杠
 	}
 	for _, tc := range cases {

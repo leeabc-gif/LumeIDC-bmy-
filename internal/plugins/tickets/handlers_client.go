@@ -333,7 +333,11 @@ func (p *Plugin) changeStatus(w http.ResponseWriter, r *http.Request, target str
 // clientAttachment POST /{ticketID}/attachments — 上传附件。
 func (p *Plugin) clientAttachment(w http.ResponseWriter, r *http.Request) {
 	userID, ok := plugin.RequireUserID(w, r)
-	if !ok || p.files == nil || p.files.Root == "" {
+	if !ok {
+		return
+	}
+	if p.files == nil || p.files.Root == "" {
+		plugin.JSONFail(w, "附件存储未配置")
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("ticketID"), 10, 64)
@@ -373,7 +377,11 @@ func (p *Plugin) clientAttachment(w http.ResponseWriter, r *http.Request) {
 // clientAttachmentDownload GET /{ticketID}/attachments/{attachmentID} — 下载（仅工单属主）。
 func (p *Plugin) clientAttachmentDownload(w http.ResponseWriter, r *http.Request) {
 	userID, ok := plugin.RequireUserID(w, r)
-	if !ok || p.files == nil || p.files.Root == "" {
+	if !ok {
+		return
+	}
+	if p.files == nil || p.files.Root == "" {
+		plugin.JSONFail(w, "附件存储未配置")
 		return
 	}
 	id, _ := strconv.ParseInt(r.PathValue("ticketID"), 10, 64)

@@ -26,6 +26,13 @@
     :deep(.el-scrollbar__wrap) {
       display: flex;
     }
+
+    // 空状态高度兜底：表格高度为 % 且父链高度不确定时，EP 会把空区块
+    // 压到 60px 并 overflow 裁掉 ElEmpty（120px 插图+描述约需 230px）。
+    // min-height 会钳制更小的内联 height，此处统一抬到能完整容纳的空态高度。
+    :deep(.el-table__empty-block) {
+      min-height: 260px;
+    }
   }
 
   .pagination {

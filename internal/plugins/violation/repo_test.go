@@ -87,11 +87,16 @@ func TestRecordsCRUD(t *testing.T) {
 		t.Fatalf("更新未生效: %+v", again)
 	}
 
-	if err := recs.Delete(ctx, id); err != nil {
-		t.Fatal(err)
+	deleted, err := recs.Delete(ctx, id)
+	if err != nil || !deleted {
+		t.Fatalf("删除失败: deleted=%v err=%v", deleted, err)
 	}
 	if gone, err := recs.Get(ctx, id); err != nil || gone != nil {
 		t.Fatalf("删除后不应存在: %+v err=%v", gone, err)
+	}
+	// 再删一次应报告未删除（不存在的 ID 不得视为成功）。
+	if again, err := recs.Delete(ctx, id); err != nil || again {
+		t.Fatalf("重复删除应 deleted=false: again=%v err=%v", again, err)
 	}
 }
 

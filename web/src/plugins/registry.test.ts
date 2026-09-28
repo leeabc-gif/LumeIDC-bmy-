@@ -20,6 +20,14 @@ describe('插件页面注册表', () => {
     expect(clientPluginComponent('spaceship')).toBeTypeOf('function')
   })
 
+  it('后台页已接线 violation', () => {
+    expect(pluginComponent('violation')).toBeTypeOf('function')
+  })
+
+  it('前台页已接线 violation', () => {
+    expect(clientPluginComponent('violation')).toBeTypeOf('function')
+  })
+
   it('未注册插件返回 undefined（壳层据此提示未启用）', () => {
     expect(pluginComponent('not-exists')).toBeUndefined()
     expect(clientPluginComponent('not-exists')).toBeUndefined()

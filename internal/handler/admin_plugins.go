@@ -2,16 +2,33 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 
 	"lumeidc/internal/middleware"
 	"lumeidc/internal/plugin"
+	"lumeidc/internal/repo"
 	"lumeidc/internal/service"
 )
 
 // AdminPlugins 插件管理：清单 / 启停切换 / 后台首页挂件收集。
-type AdminPlugins struct{}
+type AdminPlugins struct {
+	AdminLog *repo.AdminLog
+}
+
+// auditPluginOp 记录插件相关后台操作审计（失败仅记日志，不阻断主流程）。
+// 插件无数值主键，target_id 统一记 0，名称放 detail。
+func auditPluginOp(l *repo.AdminLog, r *http.Request, action, detail string) {
+	if l == nil {
+		return
+	}
+	var aid int64
+	if s := middleware.FromSession(r.Context()); s != nil {
+		aid = s.UserID
+	}
+	l.Record(aid, action, "plugin", 0, detail, r.RemoteAddr)
+}
 
 type pluginListItem struct {
 	Name         string `json:"name"`
@@ -94,6 +111,11 @@ func (h *AdminPlugins) Toggle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"ok": 0, "msg": "保存失败，请稍后重试"})
 		return
 	}
+	state := "禁用"
+	if req.Enabled {
+		state = "启用"
+	}
+	auditPluginOp(h.AdminLog, r, "plugin_toggle", fmt.Sprintf("%s插件 %s", state, name))
 	writeJSON(w, map[string]any{"ok": 1})
 }
 

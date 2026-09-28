@@ -5,6 +5,7 @@ import (
 	"log"
 	"sort"
 	"sync"
+	"time"
 )
 
 // EventHandler 事件订阅回调。返回 error 仅记录日志，不影响其他订阅者与主流程。
@@ -173,6 +174,8 @@ const (
 	EventRefundCreated     = "refund.created"      // payload: RefundPayload
 	EventIdentitySubmitted = "identity.submitted"  // payload: UserPayload
 	EventIdentityReviewed  = "identity.reviewed"   // payload: IdentityReviewedPayload
+	EventServiceExpiring   = "service.expiring"    // payload: ServiceExpiringPayload
+	EventPromotionEnding   = "promotion.ending"    // payload: PromotionEndingPayload
 )
 
 func init() {
@@ -189,6 +192,8 @@ func init() {
 	RegisterEvent(EventRefundCreated, "退款单创建")
 	RegisterEvent(EventIdentitySubmitted, "实名认证提交")
 	RegisterEvent(EventIdentityReviewed, "实名认证审核")
+	RegisterEvent(EventServiceExpiring, "服务到期提醒已发送")
+	RegisterEvent(EventPromotionEnding, "活动即将结束提醒已发送")
 }
 
 // OrderPaidPayload 订单/账单支付成功。
@@ -240,6 +245,21 @@ type UserPayload struct {
 type InvoiceExpiredPayload struct {
 	InvoiceIDs []int64 `json:"invoiceIds"`
 	Count      int     `json:"count"`
+}
+
+// ServiceExpiringPayload 服务到期提醒已发送（cron 按服务逐条触发）。
+type ServiceExpiringPayload struct {
+	ServiceID int64     `json:"serviceId"`
+	UserID    int64     `json:"userId"`
+	ProductID int64     `json:"productId"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+// PromotionEndingPayload 活动即将结束提醒已发送（cron 按活动去重触发）。
+type PromotionEndingPayload struct {
+	PromotionID int64     `json:"promotionId"`
+	Name        string    `json:"name"`
+	EndsAt      time.Time `json:"endsAt"`
 }
 
 // NotificationMessage 通知发送前过滤器（notify.message）的可改载荷。

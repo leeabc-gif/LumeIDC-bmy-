@@ -98,10 +98,14 @@ func (r *Records) Get(ctx context.Context, id int64) (*Record, error) {
 	return rec, err
 }
 
-// Delete 删除记录。
-func (r *Records) Delete(ctx context.Context, id int64) error {
-	_, err := r.db.ExecContext(ctx, `DELETE FROM plugin_violation_records WHERE id=$1`, id)
-	return err
+// Delete 删除记录；返回是否确有记录被删（调用方据此决定是否外发事件）。
+func (r *Records) Delete(ctx context.Context, id int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `DELETE FROM plugin_violation_records WHERE id=$1`, id)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 // RecordFilter 后台列表筛选条件（Keyword 匹配用户邮箱/昵称/描述）。

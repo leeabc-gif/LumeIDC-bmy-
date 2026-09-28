@@ -212,6 +212,11 @@ func (j *Jobs) notifyEndingPromotions(ctx context.Context) {
 		return
 	}
 	rows.Close()
+	type promo struct {
+		name   string
+		endsAt time.Time
+	}
+	notified := map[int64]promo{}
 	for _, it := range items {
 		endsAt := it.endsAt.Format("2006-01-02 15:04")
 		body := fmt.Sprintf("你参与的活动「%s」将于 %s 结束。", it.name, endsAt)
@@ -221,6 +226,13 @@ func (j *Jobs) notifyEndingPromotions(ctx context.Context) {
 		if _, err := j.DB.ExecContext(ctx, `INSERT INTO promotion_ending_notifications(promotion_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, it.promotionID, it.userID); err != nil {
 			j.failTask(ctx, taskNotifyEndingPromos, "写入活动即将结束提醒标记", err)
 		}
+		notified[it.promotionID] = promo{name: it.name, endsAt: it.endsAt}
+	}
+	// 外发插件事件：按活动去重（而非按参与者逐条），webhook 类订阅方一活动收一次。
+	for id, pr := range notified {
+		plugin.Emit(ctx, plugin.EventPromotionEnding, plugin.PromotionEndingPayload{
+			PromotionID: id, Name: pr.name, EndsAt: pr.endsAt,
+		})
 	}
 }
 
@@ -431,7 +443,7 @@ func (j *Jobs) notifyExpiringSoon(ctx context.Context) {
 	}
 	_, _, warn := j.lifecycleDays(ctx)
 	rows, err := j.DB.QueryContext(ctx,
-		`SELECT sv.id, sv.user_id, coalesce(u.email,''), sv.expires_at
+		`SELECT sv.id, sv.user_id, sv.product_id, coalesce(u.email,''), sv.expires_at
 		 FROM services sv JOIN users u ON u.id=sv.user_id
 		 WHERE sv.status=1 AND sv.expire_warn_sent=false
 		   AND sv.expires_at BETWEEN now() AND now() + make_interval(days => $1)`, warn)
@@ -442,13 +454,14 @@ func (j *Jobs) notifyExpiringSoon(ctx context.Context) {
 	type item struct {
 		id  int64
 		uid int64
+		pid int64
 		exp time.Time
 	}
 	var items []item
 	for rows.Next() {
 		var it item
 		var email string
-		if err := rows.Scan(&it.id, &it.uid, &email, &it.exp); err != nil {
+		if err := rows.Scan(&it.id, &it.uid, &it.pid, &email, &it.exp); err != nil {
 			continue
 		}
 		items = append(items, it)
@@ -461,6 +474,10 @@ func (j *Jobs) notifyExpiringSoon(ctx context.Context) {
 			continue
 		}
 		warnedIDs = append(warnedIDs, it.id)
+		// 外发插件事件，让 webhook 类订阅方也能感知到期提醒（站内信/邮件之外的渠道）。
+		plugin.Emit(ctx, plugin.EventServiceExpiring, plugin.ServiceExpiringPayload{
+			ServiceID: it.id, UserID: it.uid, ProductID: it.pid, ExpiresAt: it.exp,
+		})
 	}
 	// 标记合并为单条 UPDATE，避免逐行往返。
 	if len(warnedIDs) > 0 {

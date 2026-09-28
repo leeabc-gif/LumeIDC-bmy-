@@ -311,11 +311,23 @@ func (p *Plugin) approveFlow(ctx context.Context, req *Request, admin sql.NullIn
 	if _, err := p.requests.AttachRefundID(ctx, req.ID, req.OrderID); err != nil {
 		p.alertAdmin(ctx, req, "回写核心退款单号失败", err)
 	}
-	// 退款后产品操作：按商品规则执行（暂停/终止），仅本地状态变更。
+	// 退款后产品操作：按商品规则执行（暂停/终止），仅本地状态变更，不触达上游；
+	// 状态变更后外发核心生命周期事件，webhook 类订阅方能感知服务被停用/删除。
 	if pid, perr := p.requests.ProductIDByOrder(ctx, req.OrderID); perr == nil {
 		if rule, rerr := p.requests.RuleForProduct(ctx, pid); rerr == nil && rule != nil {
-			if err := p.requests.ApplyPostRefundAction(ctx, req.OrderID, rule.PostRefundAction); err != nil {
-				p.alertAdmin(ctx, req, "退款后产品操作失败", err)
+			affected, aerr := p.requests.ApplyPostRefundAction(ctx, req.OrderID, rule.PostRefundAction)
+			if aerr != nil {
+				p.alertAdmin(ctx, req, "退款后产品操作失败", aerr)
+			} else {
+				evt := plugin.EventServiceSuspended
+				if rule.PostRefundAction == "terminate" {
+					evt = plugin.EventServiceTerminated
+				}
+				for _, s := range affected {
+					plugin.Emit(ctx, evt, plugin.ServicePayload{
+						ServiceID: s.ServiceID, UserID: s.UserID, ProductID: s.ProductID,
+					})
+				}
 			}
 		}
 	}

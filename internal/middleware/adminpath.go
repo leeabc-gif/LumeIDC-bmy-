@@ -16,6 +16,8 @@ var reservedTopPaths = []string{
 	"login", "register", "logout", "verify", "captcha", "auth",
 	"products", "cart", "services", "buy", "user", "notifications",
 	"order", "pay", "mock", "assets", "healthz", "readyz", "install",
+	// 插件框架：/plugin/{name}/*（插件路由）、/plugins/client、/plugins/injections
+	"plugin", "plugins",
 }
 
 var adminPathRE = regexp.MustCompile(`^/[A-Za-z0-9_-]{2,32}$`)

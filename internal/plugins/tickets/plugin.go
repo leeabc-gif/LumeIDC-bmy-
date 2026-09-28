@@ -12,7 +12,7 @@ import (
 	"lumeidc/internal/storage"
 )
 
-// Name 插件名常量（核心聚合点按此查启用态）。
+// Name 插件名常量。注意：核心聚合点（铃铛工单入口）用字符串字面量按此名查启用态。
 const Name = "tickets"
 
 // 插件事件（供 webhooknotify 等订阅）。

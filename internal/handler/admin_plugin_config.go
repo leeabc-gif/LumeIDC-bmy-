@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -20,6 +21,7 @@ import (
 // POST 留空沿用）；multiselect 存 JSON 数组字符串；switch 存 "1"/"0"。
 type AdminPluginConfig struct {
 	Settings *repo.Settings
+	AdminLog *repo.AdminLog
 	Name     string
 	Schema   []plugin.ConfigField
 }
@@ -94,6 +96,17 @@ func (h *AdminPluginConfig) Save(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if len(pending) > 0 {
+		keys := make([]string, 0, len(pending))
+		for _, f := range h.Schema {
+			if _, ok := pending[h.settingKey(f.Key)]; ok {
+				keys = append(keys, f.Key)
+			}
+		}
+		sort.Strings(keys)
+		// 只记键名不记值（可能含密钥）。
+		auditPluginOp(h.AdminLog, r, "plugin_config", "插件 "+h.Name+" 配置保存: "+strings.Join(keys, ","))
+	}
 	writeJSON(w, map[string]any{"ok": 1})
 }
 
@@ -124,10 +137,9 @@ func (h *AdminPluginConfig) validateField(f plugin.ConfigField, raw json.RawMess
 		if v == "" {
 			return "", false, "" // 清空允许
 		}
-		for _, opt := range f.Options {
-			if opt.Value == v {
-				return v, false, ""
-			}
+		// 与 multiselect 一致：静态选项 + OptionsRef 动态选项都合法。
+		if h.optionsOf(f)[v] {
+			return v, false, ""
 		}
 		return "", false, "选项不在允许范围内"
 	case "multiselect":

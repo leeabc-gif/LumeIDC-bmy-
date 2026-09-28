@@ -60,7 +60,7 @@ func (p *Plugin) clientEligibleOrders(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := r.Context()
 	limit, offset := parseEligiblePage(r)
-	orders, err := p.requests.EligibleOrders(ctx, userID, p.cfgInt(ctx, "refundWindowDays", 7), limit+1, offset)
+	orders, err := p.requests.EligibleOrders(ctx, userID, p.cfgInt(ctx, "refundWindowDays", defWindowDaysN), limit+1, offset)
 	if err != nil {
 		plugin.JSONFail(w, "查询失败")
 		return
@@ -240,7 +240,7 @@ func (p *Plugin) clientCreate(w http.ResponseWriter, r *http.Request) {
 			plugin.JSONFail(w, "已超过可退期限")
 			return
 		}
-	} else if days := p.cfgInt(ctx, "refundWindowDays", 7); days > 0 {
+	} else if days := p.cfgInt(ctx, "refundWindowDays", defWindowDaysN); days > 0 {
 		if !order.PaidAt.Valid {
 			plugin.JSONFail(w, "订单支付时间异常，不可退款")
 			return

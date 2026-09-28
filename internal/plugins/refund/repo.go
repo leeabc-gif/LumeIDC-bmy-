@@ -524,17 +524,41 @@ func (r *Requests) IsFirstPaidOrderOfProduct(ctx context.Context, orderID, userI
 	return n == 0, nil
 }
 
+// ServiceRef 服务简要引用（退款后事件外发用）。
+type ServiceRef struct {
+	ServiceID int64
+	UserID    int64
+	ProductID int64
+}
+
 // ApplyPostRefundAction 退款后产品操作：suspend→status=2, terminate→status=3。
-func (r *Requests) ApplyPostRefundAction(ctx context.Context, orderID int64, action string) error {
+// 返回实际发生状态变更的服务（调用方据此外发 service.suspended/terminated 事件）。
+// 仅本地状态变更，不触达上游停机/删除。
+func (r *Requests) ApplyPostRefundAction(ctx context.Context, orderID int64, action string) ([]ServiceRef, error) {
+	var newStatus int
+	var cond string
 	switch action {
 	case "suspend":
-		_, err := r.db.ExecContext(ctx,
-			`UPDATE services SET status=2 WHERE order_id=$1 AND status=1`, orderID)
-		return err
+		newStatus, cond = 2, "status=1"
 	case "terminate":
-		_, err := r.db.ExecContext(ctx,
-			`UPDATE services SET status=3 WHERE order_id=$1 AND status<3`, orderID)
-		return err
+		newStatus, cond = 3, "status<3"
+	default:
+		return nil, nil
 	}
-	return nil
+	rows, err := r.db.QueryContext(ctx,
+		`UPDATE services SET status=$2 WHERE order_id=$1 AND `+cond+
+			` RETURNING id,user_id,product_id`, orderID, newStatus)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ServiceRef
+	for rows.Next() {
+		var s ServiceRef
+		if err := rows.Scan(&s.ServiceID, &s.UserID, &s.ProductID); err != nil {
+			return out, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
 }

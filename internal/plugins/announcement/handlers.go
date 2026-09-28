@@ -129,8 +129,9 @@ func (p *Plugin) adminForm(w http.ResponseWriter, r *http.Request) {
 	var announcement any
 	if id := r.URL.Query().Get("id"); id != "" {
 		if pid, err := strconv.ParseInt(id, 10, 64); err == nil {
-			if an, gerr := p.store.Get(r.Context(), pid); gerr == nil {
-				announcement = an
+			if an, gerr := p.store.Get(r.Context(), pid); gerr == nil && an != nil {
+				// 走 item 视图序列化，与列表键名一致（结构体直接序列化会输出帕斯卡键）。
+				announcement = item(*an, true)
 			}
 		}
 	}
@@ -191,7 +192,11 @@ func (p *Plugin) adminDelete(w http.ResponseWriter, r *http.Request) {
 	if !plugin.AdminOK(w, r) {
 		return
 	}
-	id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		plugin.StatusFail(w, 400, "参数错误")
+		return
+	}
 	if err := p.store.Delete(r.Context(), id); err != nil {
 		plugin.JSONFail(w, "删除失败，请稍后重试")
 		return

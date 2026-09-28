@@ -69,6 +69,7 @@ const (
 // 故读取处按此兜底，保证与配置页展示的默认值一致）。
 const (
 	defWindowDays  = "7"
+	defWindowDaysN = 7 // defWindowDays 的数值形态（cfgInt 默认值用，二者需同步）
 	defMethods     = `["balance"]`
 	defReasons     = "不想要了\n功能不符合预期\n重复购买\n服务不稳定\n其他"
 	defReviewMode  = "manual"
@@ -251,7 +252,7 @@ func (p *Plugin) clientOptions(ctx context.Context) map[string]any {
 		"reasons":  splitLines(p.cfg(ctx, "refundReasons", defReasons)),
 		"maxCents": p.cfgCents(ctx, "refundMaxAmount", 0),
 		"maxText":  money.FormatCents(p.cfgCents(ctx, "refundMaxAmount", 0)),
-		"windowDays": p.cfgInt(ctx, "refundWindowDays", 7),
+		"windowDays": p.cfgInt(ctx, "refundWindowDays", defWindowDaysN),
 	}
 }
 

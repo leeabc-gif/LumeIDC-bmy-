@@ -1,0 +1,56 @@
+# 依赖验证 CI：在 PR/push 上跑构建与测试，验证 dependabot 升级后的依赖
+# 是否仍能编译通过。release.yml 只在打 tag 时触发，dependabot PR 走这里。
+#
+# 顺序注意：web 构建产物直接输出到 internal/handler/webui/dist，
+# 由 handler/webui.go 的 go:embed all:webui/dist 嵌入——必须先构建前端，
+# 再跑 go vet/test，否则 Go 编译因 embed 目录缺失而失败。
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  NODE_VERSION: '24'
+  GO_VERSION: '1.26'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装前端依赖
+        # GitHub runner 上用官方源更稳，并加大重试次数/超时兜底偶发网络抖动
+        run: >
+          npm ci
+          --registry=https://registry.npmjs.org/
+          --fetch-retries=5
+          --fetch-retry-mintimeout=5000
+          --fetch-retry-maxtimeout=120000
+        working-directory: web
+
+      - name: 前端构建（含 vue-tsc 类型检查；产物写入 Go embed 目录）
+        run: npm run build
+        working-directory: web
+
+      - name: 前端单元测试
+        run: npm run test
+        working-directory: web
+
+      - name: Go 静态检查
+        run: go vet ./...
+
+      - name: Go 测试
+        run: go test ./...

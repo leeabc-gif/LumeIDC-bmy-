@@ -400,7 +400,11 @@ func (p *Plugin) adminInternalNote(w http.ResponseWriter, r *http.Request) {
 // adminAttachment POST /{ticketID}/attachments — 管理侧上传附件。
 func (p *Plugin) adminAttachment(w http.ResponseWriter, r *http.Request) {
 	id, ok := p.adminTicketID(w, r)
-	if !ok || p.files == nil || p.files.Root == "" {
+	if !ok {
+		return
+	}
+	if p.files == nil || p.files.Root == "" {
+		plugin.JSONFail(w, "附件存储未配置")
 		return
 	}
 	if err := r.ParseMultipartForm(12 << 20); err != nil {
@@ -430,7 +434,11 @@ func (p *Plugin) adminAttachment(w http.ResponseWriter, r *http.Request) {
 
 // adminAttachmentDownload GET /{ticketID}/attachments/{attachmentID} — 管理侧下载。
 func (p *Plugin) adminAttachmentDownload(w http.ResponseWriter, r *http.Request) {
-	if !plugin.AdminOK(w, r) || p.files == nil || p.files.Root == "" {
+	if !plugin.AdminOK(w, r) {
+		return
+	}
+	if p.files == nil || p.files.Root == "" {
+		plugin.JSONFail(w, "附件存储未配置")
 		return
 	}
 	aid, _ := strconv.ParseInt(r.PathValue("attachmentID"), 10, 64)
