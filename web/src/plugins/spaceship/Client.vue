@@ -687,7 +687,7 @@ onMounted(() => {
                 {{ resultLabel(item).text }}
               </el-tag>
               <span v-if="item.listPrice" class="check-item__price">
-                ￥{{ item.listPrice }} / {{ searchYears }} 年
+                ￥{{ item.listPrice }} / {{ item.quoteYears }} 年
               </span>
               <span v-else class="check-item__tip">该后缀暂未上架</span>
             </div>

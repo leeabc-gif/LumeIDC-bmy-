@@ -263,8 +263,8 @@ func (p *Plugin) reportOrphanUpstream(ctx context.Context, o *OrderRow, opID, ki
 		return
 	}
 	kindName := map[string]string{"register": "域名注册", "renew": "域名续费"}[kind]
-	_ = p.repo.SetOrderNote(ctx, o.ID,
-		fmt.Sprintf("%s失败自动退款 %s（上游已受理 opID=%s，本地落库失败: %s，需对账）", kindName, o.Domain, opID, cause))
+	_ = p.repo.AppendOrderNote(ctx, o.ID,
+		fmt.Sprintf("%s失败自动退款（上游已受理 opID=%s，本地落库失败: %s，需对账）", kindName, opID, cause))
 	if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
 		alertKey := fmt.Sprintf("spaceship.orphan:%s:%s", opID, time.Now().Format("2006-01-02"))
 		_ = p.host.Notify.NotifyAdminOnce(ctx, alertKey, alertCategorySpaceshipPoll,

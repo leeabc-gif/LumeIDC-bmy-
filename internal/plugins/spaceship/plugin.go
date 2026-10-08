@@ -100,7 +100,7 @@ type repoStore interface {
 	CreateOrder(ctx context.Context, o *OrderRow) (int64, error)
 	RefundOrderIfPaid(ctx context.Context, id int64) (bool, error)
 	UpdateOrderDomain(ctx context.Context, orderID, domainID int64) error
-	SetOrderNote(ctx context.Context, id int64, note string) error
+	AppendOrderNote(ctx context.Context, id int64, extra string) error
 	LatestPaidOrder(ctx context.Context, domainID int64, kind string) (*OrderRow, error)
 	ListOrders(ctx context.Context, userID sql.NullInt64, limit, offset int) ([]*OrderRow, error)
 	WithTx(tx *sql.Tx) repoStore

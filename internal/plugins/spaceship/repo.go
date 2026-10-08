@@ -434,10 +434,14 @@ func (r *Repo) MarkPendingRetried(ctx context.Context, id int64) (bool, error) {
 	return n > 0, nil
 }
 
-// SetOrderNote 覆写订单备注（对账留痕用：上游已受理但本地落库失败时写入 opID）。
-func (r *Repo) SetOrderNote(ctx context.Context, id int64, note string) error {
+// AppendOrderNote 追加订单备注（保留原备注，如"管理员 N 代注册"的归属信息），
+// 对账留痕用：上游已受理但本地落库失败时写入 opID。
+func (r *Repo) AppendOrderNote(ctx context.Context, id int64, extra string) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE plugin_spaceship_orders SET note=$1, updated_at=now() WHERE id=$2`, note, id)
+		`UPDATE plugin_spaceship_orders SET
+		 note = CASE WHEN note IS NULL OR note = '' THEN $1 ELSE note || '；' || $1 END,
+		 updated_at = now()
+		 WHERE id=$2`, extra, id)
 	return err
 }
 

@@ -182,6 +182,9 @@ const registerAmountText = computed(() => {
   return ((q.amountCents * registerForm.years) / 100).toFixed(2)
 })
 
+// 询价序号：并发/重复触发时旧响应一律作废（守卫结果写入与 loading 归零）
+let quoteSeq = 0
+
 // 按当前域名向服务端询价（后台价目表 + SpaceShip 溢价标记）
 async function quoteRegister() {
   const domain = registerForm.domain.trim().toLowerCase()
@@ -189,13 +192,14 @@ async function quoteRegister() {
     registerQuote.value = null
     return
   }
+  const seq = ++quoteSeq
   registerChecking.value = true
   try {
     const res = await http.post<{ ok: number; msg?: string; item?: CheckItem }>('/plugin/spaceship/check', {
       domain,
     })
-    // 竞态守卫：慢响应返回时域名已被改，丢弃过期报价（否则显示旧域名价格）
-    if (registerForm.domain.trim().toLowerCase() !== domain) return
+    // 竞态守卫：更新的询价已发起、域名已变/被重置、或弹窗已关闭（关闭会触发 blur）→ 丢弃过期响应
+    if (seq !== quoteSeq || !registerDialogVisible.value || registerForm.domain.trim().toLowerCase() !== domain) return
     if (String(res.ok) !== '1' || !res.item) {
       registerQuote.value = null
       ElMessage.warning({ message: res.msg || '询价失败，请检查 Spaceship API 配置', grouping: true })
@@ -214,12 +218,13 @@ async function quoteRegister() {
       registerForm.allowPremium = false
     }
   } catch (err: unknown) {
-    if (registerForm.domain.trim().toLowerCase() !== domain) return
+    if (seq !== quoteSeq || !registerDialogVisible.value || registerForm.domain.trim().toLowerCase() !== domain) return
     registerQuote.value = null
     // 询价失败不能静默：否则管理员以为域名可用，直接提交会被后端拒绝
     ElMessage.warning({ message: (err as Error).message || '询价失败，请检查 Spaceship API 配置', grouping: true })
   } finally {
-    registerChecking.value = false
+    // 仅最新一次询价有权收起 loading，避免并发时「正在询价…」提前消失
+    if (seq === quoteSeq) registerChecking.value = false
   }
 }
 
@@ -1037,12 +1042,15 @@ onMounted(() => {
         </el-form-item>
         <el-form-item label="服务端报价">
           <div v-if="registerChecking" class="text-g-500 text-xs">正在询价…</div>
-          <div v-else-if="registerQuote">
+          <div v-else-if="registerQuote && registerAmountText">
             <span class="quote-price">¥{{ registerAmountText }}</span>
             <span class="text-g-500 ml-2 text-xs">
               {{ registerForm.years }} 年 ·
               {{ registerQuote.available ? '可注册' : `不可注册（${registerQuote.result}）` }}
             </span>
+          </div>
+          <div v-else-if="registerQuote" class="text-g-500 text-xs">
+            {{ registerQuote.available ? '该后缀未上架，无法注册' : `不可注册（${registerQuote.result}）` }}
           </div>
           <div v-else class="text-g-500 text-xs">输入域名后自动按价目表报价</div>
         </el-form-item>
