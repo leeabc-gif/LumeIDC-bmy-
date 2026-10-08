@@ -207,14 +207,14 @@ func TestPluginMeta(t *testing.T) {
 	}
 }
 
-// 配置结构：四个键且类型合法（自动表单渲染依赖）。
+// 配置结构：五个键且类型合法（自动表单渲染依赖）。
 func TestConfigSchema(t *testing.T) {
 	fields := (&Plugin{}).ConfigSchema()
 	keys := map[string]string{}
 	for _, f := range fields {
 		keys[f.Key] = f.Type
 	}
-	want := map[string]string{"typeOptions": "textarea", "actionOptions": "textarea", "defaultPublic": "switch", "notifyUser": "switch"}
+	want := map[string]string{"typeOptions": "textarea", "actionOptions": "textarea", "defaultPublic": "switch", "notifyUser": "switch", "adminOpRatePerMin": "number"}
 	for k, typ := range want {
 		if keys[k] != typ {
 			t.Fatalf("配置 %q 类型错误: got %q want %q", k, keys[k], typ)

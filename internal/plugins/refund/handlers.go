@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -358,8 +359,9 @@ func (p *Plugin) alertAdmin(ctx context.Context, req *Request, subject string, c
 	body := fmt.Sprintf("退款申请 #%d（订单 #%d，用户 #%d，金额 %s 元）后续处理失败：%s。请人工复核。",
 		req.ID, req.OrderID, req.UserID, req.Amount, cause.Error())
 	if aerr := p.host.Notify.NotifyAdminOnce(ctx, key, "退款复核", subject, body); aerr != nil {
-		// 告警通道本身失败仅记录日志层由调用方处理，这里不做二次失败传播。
-		return
+		// 此时记账已失败 + 告警又发不出去 = 双重静默，必须留日志供人工复核
+		//（与 notifier.go alertChannelOnce 的失败处理保持一致）。
+		log.Printf("[refund] 退款申请 #%d 复核告警发送失败（subject=%s）: %v", req.ID, subject, aerr)
 	}
 }
 

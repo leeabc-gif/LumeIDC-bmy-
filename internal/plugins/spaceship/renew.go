@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -16,7 +17,7 @@ import (
 // ---- 续费（官方 POST /v1/domains/{domain}/renew） ----
 //
 // 官方要求：years（1-10）+ currentExpirationDate（当前到期时间，string <date-time>）。
-// 续费与注册共用同一套资金规则：服务端定价 → 事务内先扣款 → 后调上游 → 失败回滚。
+// 续费与注册共用同一套资金规则：服务端定价 → 短事务扣款 → 事务外调上游 → 失败原子退款。
 
 // renewResult 续费成功后的返回体。
 type renewResult struct {
@@ -95,7 +96,9 @@ func (p *Plugin) renewInternal(ctx context.Context, c *Client, in renewInput) (*
 		note = fmt.Sprintf("域名续费 %s %d 年", d.Domain, years)
 	}
 
-	// 3. 事务：扣款 → 调上游 → 落库 → 提交
+	// 3. 短事务：扣款 + 订单落库后立即提交。
+	//    上游调用绝不放进事务：ConsumeAmount 会对用户余额行 FOR UPDATE，
+	//    事务横跨最长 30s 的上游 HTTP 会阻塞该用户所有余额操作并占死连接。
 	tx, err := p.host.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, errors.New("事务开启失败: " + err.Error())
@@ -111,13 +114,7 @@ func (p *Plugin) renewInternal(ctx context.Context, c *Client, in renewInput) (*
 		return nil, errors.New("余额扣减失败: " + err.Error())
 	}
 
-	opID, err := c.RenewDomain(ctx, d.Domain, years, expiry)
-	if err != nil {
-		_ = tx.Rollback()
-		return nil, errors.New("Spaceship 续费失败: " + err.Error())
-	}
-
-	if _, err := txRepo.CreateOrder(ctx, &OrderRow{
+	order := &OrderRow{
 		DomainID:    sql.NullInt64{Int64: d.ID, Valid: true},
 		Domain:      d.Domain,
 		UserID:      d.UserID,
@@ -126,12 +123,31 @@ func (p *Plugin) renewInternal(ctx context.Context, c *Client, in renewInput) (*
 		AmountCents: amountCents,
 		Status:      "paid",
 		Note:        sql.NullString{String: note, Valid: true},
-	}); err != nil {
+	}
+	orderID, err := txRepo.CreateOrder(ctx, order)
+	if err != nil {
 		_ = tx.Rollback()
 		return nil, errors.New("订单落库失败: " + err.Error())
 	}
+	order.ID = orderID
+	if err := tx.Commit(); err != nil {
+		return nil, errors.New("事务提交失败: " + err.Error())
+	}
 
-	if _, err := txRepo.CreateOperation(ctx, &OperationRow{
+	// 4. 上游续费（事务外）：失败 → 原子退款（先条件 UPDATE 认领订单，再回补余额）
+	opID, err := c.RenewDomain(ctx, d.Domain, years, expiry)
+	if err != nil {
+		p.refundOrderPaid(ctx, order, "renew")
+		return nil, errors.New("Spaceship 续费失败: " + err.Error())
+	}
+
+	// 5. 操作记录落库；失败则退款（钱不能因本地故障而悬挂）
+	tx2, err := p.host.DB.BeginTx(ctx, nil)
+	if err != nil {
+		p.refundOrderPaid(ctx, order, "renew")
+		return nil, errors.New("事务开启失败: " + err.Error())
+	}
+	if _, err := txRepo.WithTx(tx2).CreateOperation(ctx, &OperationRow{
 		OperationID: opID,
 		DomainID:    sql.NullInt64{Int64: d.ID, Valid: true},
 		Domain:      d.Domain,
@@ -139,12 +155,13 @@ func (p *Plugin) renewInternal(ctx context.Context, c *Client, in renewInput) (*
 		Status:      "pending",
 		StartedAt:   time.Now(),
 	}); err != nil {
-		_ = tx.Rollback()
-		return nil, errors.New("操作记录落库失败: " + err.Error())
+		_ = tx2.Rollback()
+		p.refundOrderPaid(ctx, order, "renew")
+		return nil, errors.New("操作记录落库失败（已退款）: " + err.Error())
 	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, errors.New("事务提交失败: " + err.Error())
+	if err := tx2.Commit(); err != nil {
+		p.refundOrderPaid(ctx, order, "renew")
+		return nil, errors.New("事务提交失败（已退款）: " + err.Error())
 	}
 	return &renewResult{
 		DomainID:    d.ID,
@@ -170,8 +187,34 @@ func writeRenewResult(w http.ResponseWriter, res *renewResult) {
 
 // ---- 失败自动退款 ----
 
+// refundOrderPaid 原子退款：先用条件 UPDATE（WHERE status='paid'）认领订单，
+// 认领成功（RowsAffected==1）才回补余额。并发/重复调用只有一个赢家，
+// 杜绝 cron 与管理员手动重试同时走失败分支导致的双倍退款。
+// 认领成功但加余额失败时打日志留痕（订单已标 refunded，需管理员人工补退）。
+func (p *Plugin) refundOrderPaid(ctx context.Context, o *OrderRow, kind string) {
+	claimed, err := p.repo.RefundOrderIfPaid(ctx, o.ID)
+	if err != nil {
+		log.Printf("[spaceship] 退款认领订单 %d 失败: %v", o.ID, err)
+		return
+	}
+	if !claimed {
+		return
+	}
+	amount := money.FormatCents(o.AmountCents)
+	note := fmt.Sprintf("%s失败自动退款 %s", map[string]string{"register": "域名注册", "renew": "域名续费"}[kind], o.Domain)
+	bal := repo.NewBalance(p.host.DB)
+	if err := bal.AdminAdjust(ctx, o.UserID, amount, note); err != nil {
+		log.Printf("[spaceship] 订单 %d 已标记退款但余额回补失败（需人工对账）: %v", o.ID, err)
+		return
+	}
+	if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
+		_ = p.host.Notify.Notify(ctx, o.UserID, kindTitle(kind)+"失败已退款",
+			fmt.Sprintf("域名 %s %s失败，已自动退回 %s 元", o.Domain, kindTitle(kind), amount))
+	}
+}
+
 // refundByDomainOperation 注册/续费异步操作失败时，把已扣的钱退回用户账上。
-// 幂等：同一订单只退一次（靠订单 status 判定）。
+// 幂等性由 RefundOrderIfPaid 的条件 UPDATE 保证：同一订单只可能被认领一次。
 func (p *Plugin) refundByDomainOperation(ctx context.Context, op *OperationRow) {
 	if !op.DomainID.Valid {
 		return
@@ -184,17 +227,7 @@ func (p *Plugin) refundByDomainOperation(ctx context.Context, op *OperationRow) 
 	if err != nil || o == nil || o.AmountCents <= 0 {
 		return
 	}
-	amount := money.FormatCents(o.AmountCents)
-	note := fmt.Sprintf("%s失败自动退款 %s", map[string]string{"register": "域名注册", "renew": "域名续费"}[kind], o.Domain)
-	bal := repo.NewBalance(p.host.DB)
-	if err := bal.AdminAdjust(ctx, o.UserID, amount, note); err != nil {
-		return
-	}
-	_ = p.repo.MarkOrderRefunded(ctx, o.ID)
-	if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
-		_ = p.host.Notify.Notify(ctx, o.UserID, kindTitle(kind)+"失败已退款",
-			fmt.Sprintf("域名 %s %s失败，已自动退回 %s 元", o.Domain, kindTitle(kind), amount))
-	}
+	p.refundOrderPaid(ctx, o, kind)
 }
 
 func kindTitle(kind string) string {

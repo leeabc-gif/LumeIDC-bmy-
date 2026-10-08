@@ -189,6 +189,7 @@ async function quoteRegister() {
     })
     if (String(res.ok) !== '1' || !res.item) {
       registerQuote.value = null
+      ElMessage.warning(res.msg || '询价失败，请检查 Spaceship API 配置')
       return
     }
     registerQuote.value = {
@@ -203,8 +204,10 @@ async function quoteRegister() {
     if (res.item.isPremium) {
       registerForm.allowPremium = false
     }
-  } catch {
+  } catch (err: unknown) {
     registerQuote.value = null
+    // 询价失败不能静默：否则管理员以为域名可用，直接提交会被后端拒绝
+    ElMessage.warning((err as Error).message || '询价失败，请检查 Spaceship API 配置')
   } finally {
     registerChecking.value = false
   }
@@ -396,7 +399,7 @@ const domainColumns = ref<ColumnOption<DomainRow>[]>([
   {
     prop: 'actions',
     label: '操作',
-    width: 180,
+    width: 250,
     fixed: 'right',
     formatter: (row) =>
       h('div', { class: 'row-actions' }, [
@@ -410,6 +413,17 @@ const domainColumns = ref<ColumnOption<DomainRow>[]>([
             onClick: () => openRenewDialog(row),
           },
           '续费'
+        ),
+        h(
+          ElButton,
+          {
+            size: 'small',
+            link: true,
+            type: row.autoRenew ? 'warning' : 'success',
+            disabled: row.status !== 'active',
+            onClick: () => toggleAutoRenew(row, !row.autoRenew),
+          },
+          row.autoRenew ? '关自动续费' : '开自动续费'
         ),
         h(
           ElButton,

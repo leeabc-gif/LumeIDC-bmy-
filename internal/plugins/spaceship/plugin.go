@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ const (
 	defEnableNotify    = "1"
 	defAllowPremium    = "0"
 	defRefundOnFailure = "1"
+	defAdminOpRate     = 30
 )
 
 // defStuckAfter 异步操作"卡死"阈值：started_at 距今超过此值的 pending 操作，
@@ -96,7 +98,8 @@ type repoStore interface {
 	UpsertPrice(ctx context.Context, row *PriceRow) (*PriceRow, error)
 	DeletePrice(ctx context.Context, tld string) error
 	CreateOrder(ctx context.Context, o *OrderRow) (int64, error)
-	MarkOrderRefunded(ctx context.Context, id int64) error
+	RefundOrderIfPaid(ctx context.Context, id int64) (bool, error)
+	UpdateOrderDomain(ctx context.Context, orderID, domainID int64) error
 	LatestPaidOrder(ctx context.Context, domainID int64, kind string) (*OrderRow, error)
 	ListOrders(ctx context.Context, userID sql.NullInt64, limit, offset int) ([]*OrderRow, error)
 	WithTx(tx *sql.Tx) repoStore
@@ -156,6 +159,8 @@ func (p *Plugin) ConfigSchema() []plugin.ConfigField {
 			Tip: "关闭时溢价域名一律拒绝注册；开启后仍需在注册前确认上游溢价报价"},
 		{Key: "refundOnFailure", Title: "注册失败自动退款", Type: "switch", Default: defRefundOnFailure,
 			Tip: "上游异步注册失败时自动把已扣金额退回用户余额；关闭则保留扣款由人工处理"},
+		{Key: "adminOpRatePerMin", Title: "管理端操作限流（次/分钟）", Type: "number", Default: strconv.Itoa(defAdminOpRate),
+			Tip: "重试/删除等危险操作按 <管理员>|<IP>|<操作> 限流；0 表示关闭（本地开发/单管理员环境）"},
 	}
 }
 
@@ -247,7 +252,7 @@ func (p *Plugin) cfgClient(ctx context.Context) *Client {
 // 限流强度取插件配置 adminOpRatePerMin（<=0 表示关闭，本地开发/单管理员机房）；
 // 键为 <adminID>|<ip>|<op>，限额语义详见 plugin.RateLimiter.AllowAdmin。
 func (p *Plugin) checkAdminRate(r *http.Request, adminID int64, op string) (bool, time.Duration) {
-	rate := p.cfgInt(r.Context(), "adminOpRatePerMin", 30)
+	rate := p.cfgInt(r.Context(), "adminOpRatePerMin", defAdminOpRate)
 	return p.limiter().AllowAdmin(r, rate, adminID, op)
 }
 
@@ -323,6 +328,17 @@ func (p *Plugin) pollOne(ctx context.Context, c *Client, op *OperationRow) error
 			}
 			_ = p.repo.UpdateDomain(ctx, op.DomainID.Int64, patch)
 		}
+		// 续费成功：回填本地 expires_at。否则第二次续费会拿旧的（已过期的）
+		// currentExpirationDate 请求上游而被 400，用户面板到期时间也会失真。
+		if op.OpType == "domain_renew" && op.DomainID.Valid {
+			if info, err := c.GetDomain(ctx, op.Domain); err == nil && info != nil {
+				if t, e := time.Parse(time.RFC3339, info.ExpiresAt); e == nil {
+					_ = p.repo.UpdateDomain(ctx, op.DomainID.Int64, map[string]any{
+						"expires_at": t, "updated_at": time.Now(),
+					})
+				}
+			}
+		}
 		// 终态告警走 NotifyAdminOnce：alertKey 含 operationID，同一笔操作多次轮询
 		// 只发一次；不同操作各自一次；管理员聚合面板按 alertCategorySpaceshipPoll 归类。
 		if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
@@ -343,7 +359,10 @@ func (p *Plugin) pollOne(ctx context.Context, c *Client, op *OperationRow) error
 		if errMsg == "" {
 			errMsg = "Spaceship 返回失败"
 		}
-		_ = p.repo.MarkFailed(ctx, op.ID, errMsg, o.Details)
+		if err := p.repo.MarkFailed(ctx, op.ID, errMsg, o.Details); err != nil {
+			// 标记失败不应静默：失败状态下轮询退款靠订单认领兜底，但仍需留痕排查。
+			log.Printf("[spaceship] 操作 %s 标记 failed 失败: %v", op.OperationID, err)
+		}
 		// 注册/续费失败：已扣的钱必须自动退回（幂等，靠订单 status 判定）。
 		// refundOnFailure 关闭时保留扣款，由管理员人工对账后再处理（默认开启）。
 		refunded := false
@@ -369,7 +388,9 @@ func (p *Plugin) pollOne(ctx context.Context, c *Client, op *OperationRow) error
 		// 超过 defStuckAfter 仍 pending → 标记 failed 并退款（防止资金长期悬挂）。
 		// 与 failed 分支同规则：钱先退回用户，管理员再对账上游是否真的注册成功。
 		if time.Since(op.StartedAt) > defStuckAfter {
-			_ = p.repo.MarkFailed(ctx, op.ID, "轮询超时（>15min），需管理员对账", nil)
+			if err := p.repo.MarkFailed(ctx, op.ID, "轮询超时（>15min），需管理员对账", nil); err != nil {
+				log.Printf("[spaceship] 操作 %s 超时标记 failed 失败: %v", op.OperationID, err)
+			}
 			if p.cfgBool(ctx, "refundOnFailure", true) {
 				p.refundByDomainOperation(ctx, op)
 			}

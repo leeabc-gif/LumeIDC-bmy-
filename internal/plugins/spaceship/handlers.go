@@ -756,9 +756,15 @@ func (p *Plugin) adminRetryOperation(w http.ResponseWriter, r *http.Request) {
 	// pending：先把 started_at 复位（no-op 若非 pending，亦不会有副作用），再手动 poll 一次。
 	resurrected := false
 	if op.Status == "pending" {
-		if ok, err := p.repo.MarkPendingRetried(r.Context(), op.ID); err == nil && ok &&
-			time.Since(op.StartedAt) > defStuckAfter {
-			resurrected = true
+		if ok, err := p.repo.MarkPendingRetried(r.Context(), op.ID); err == nil && ok {
+			if time.Since(op.StartedAt) > defStuckAfter {
+				resurrected = true
+			}
+			// 复位后必须重新取 op：pollOne 用 op.StartedAt 判断 >15min 卡死，
+			// 若沿用复位前的旧对象，宽限窗会立即失效（pending 被直接标失败+退款）。
+			if fresh, ferr := p.repo.GetOperation(r.Context(), op.ID); ferr == nil {
+				op = fresh
+			}
 		}
 	}
 	c := p.cfgClient(r.Context())

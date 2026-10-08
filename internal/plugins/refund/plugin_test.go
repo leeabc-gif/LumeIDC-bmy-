@@ -325,6 +325,7 @@ func TestConfigSchema(t *testing.T) {
 		"notifyDingtalkUrl":    "text",
 		"notifyFeishu":         "switch",
 		"notifyFeishuUrl":      "text",
+		"adminApproveRatePerMin": "number",
 	}
 	for k, typ := range want {
 		if keys[k] != typ {

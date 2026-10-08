@@ -260,6 +260,37 @@ func TestPollOneSuccessNonCreate(t *testing.T) {
 	}
 }
 
+// pollOne success（domain_renew）：必须向上游查询并回填本地 expires_at。
+// 否则第二次续费会拿旧的（已过期）currentExpirationDate 被上游 400，
+// 用户面板到期时间也会失真。
+func TestPollOneRenewSuccessBackfillsExpiry(t *testing.T) {
+	fr := &fakeRepo{}
+	p, _ := newPollPlugin(nil, fr)
+	c, _ := opServer(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/async-operations/"):
+			writeOp(w, http.StatusOK, `{"operationId":"op-r2","status":"success","details":{}}`)
+		default: // GET /domains/{domain}
+			writeOp(w, http.StatusOK, `{"domain":"qa.example","expiresAt":"2027-06-01T00:00:00Z"}`)
+		}
+	})
+	op := &OperationRow{ID: 30, OperationID: "op-r2", OpType: "domain_renew",
+		DomainID: sql.NullInt64{Int64: 9, Valid: true}, Domain: "qa.example",
+		Status: "pending", StartedAt: time.Now()}
+	if err := p.pollOne(context.Background(), c, op); err != nil {
+		t.Fatalf("success 不应报错: %v", err)
+	}
+	if len(fr.patches) != 1 {
+		t.Fatalf("续费成功应回填 expires_at 一次: %+v", fr.patches)
+	}
+	if fr.patches[0].id != 9 {
+		t.Fatalf("应回填对应域名 id=9: %+v", fr.patches[0])
+	}
+	if _, ok := fr.patches[0].patches["expires_at"].(time.Time); !ok {
+		t.Fatalf("expires_at 应为 time.Time: %+v", fr.patches[0].patches)
+	}
+}
+
 // pollOne failed：errMsg 回退链 o.Error → details.error → details.message → 固定兜底；
 // 通知管理员（标题含失败原因）。
 func TestPollOneFailedErrMsgChain(t *testing.T) {

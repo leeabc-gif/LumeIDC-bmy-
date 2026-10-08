@@ -77,6 +77,8 @@ const (
 	defMaxAmount   = "0"
 	defNotifyAdmin = "1"
 	defNotifyUser  = "1"
+	// defAdminRate 审核限流默认值（数值形态供 cfgInt 兜底，字符串形态供配置页展示）。
+	defAdminRate = "30"
 )
 
 func init() {
@@ -163,6 +165,9 @@ func (p *Plugin) ConfigSchema() []plugin.ConfigField {
 		{Key: "notifyFeishu", Title: "飞书通知", Type: "switch", Default: "0"},
 		{Key: "notifyFeishuUrl", Title: "飞书机器人 Webhook", Type: "text",
 			Tip: "开启后新退款申请/审核结果将推送到该机器人"},
+		// ---- 管理端审核限流 ----
+		{Key: "adminApproveRatePerMin", Title: "审核操作限流（次/分钟）", Type: "number", Default: defAdminRate,
+			Tip: "通过/驳回等危险操作按 <管理员>|<IP>|<操作> 限流；0 表示关闭（本地开发/单管理员环境）"},
 	}
 }
 

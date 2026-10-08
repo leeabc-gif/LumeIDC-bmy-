@@ -14,15 +14,16 @@ import (
 	"lumeidc/internal/repo"
 )
 
-// ---- 统一注册事务（前台自助 / 后台代注册 共用） ----
+// ---- 统一注册流程（前台自助 / 后台代注册 共用） ----
 //
 // 修复的 P0 事故：
 //  1. 后台代注册不扣款（白送域名）；
 //  2. 价格由客户端 paidAmount 决定（填 0.01 元即可注册）；
 //  3. 先调上游后扣款：余额不足或落库失败时域名已被注册走，形成孤儿域名/资损。
 //
-// 现在的顺序：服务端定价 → 事务内扣款 → 调上游 → 落库 → 提交；
-// 上游失败或落库失败一律回滚（余额退回），绝不产生"钱扣了域名没有"或"域名有了没扣钱"。
+// 现在的顺序：服务端定价 → 短事务扣款+订单落库（立即提交，余额行锁不横跨 HTTP）
+// → 事务外调上游 → 成功后落域名/操作记录；上游失败或落库失败走原子退款
+// （先条件 UPDATE 认领订单再回补余额），绝不产生"钱扣了域名没有"或重复退款。
 
 // registerResult 注册成功后的返回体。
 type registerResult struct {
@@ -45,7 +46,7 @@ type registerInput struct {
 	Note         string
 }
 
-// registerInternal 统一注册入口：服务端定价 + 事务内先扣款 + 后调上游 + 失败回滚。
+// registerInternal 统一注册入口：服务端定价 + 短事务扣款 + 事务外调上游 + 失败原子退款。
 // 返回 *registerResult；err 为业务错误（可直接提示给用户）。
 func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInput) (*registerResult, error) {
 	domain := strings.TrimSpace(strings.ToLower(in.Domain))
@@ -103,7 +104,10 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 		return nil, err
 	}
 
-	// 5. 事务：扣款 → 调上游 → 落库 → 提交（任一步失败整体回滚）
+	// 5. 短事务：扣款 + 订单落库后立即提交。
+	//    上游调用绝不放进事务：ConsumeAmount 会对用户余额行 FOR UPDATE（见
+	//    internal/repo/balance.go），事务横跨最长 30s 的上游 HTTP 会阻塞该用户
+	//    所有余额操作并占死连接池连接，并发注册可耗尽连接。
 	amountStr := money.FormatCents(amountCents)
 	note := "域名注册 " + domain
 	if in.AdminID > 0 {
@@ -124,7 +128,27 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 		return nil, errors.New("余额扣减失败: " + err.Error())
 	}
 
-	// 5.1 上游注册：失败 → 回滚，余额自动退回（不会产生"扣了钱没域名"）
+	// 订单轨迹（对账用）：domain_id 先空，上游受理后再回填。
+	order := &OrderRow{
+		Domain:      domain,
+		UserID:      in.UserID,
+		Kind:        "register",
+		Years:       years,
+		AmountCents: amountCents,
+		Status:      "paid",
+		Note:        sql.NullString{String: note, Valid: true},
+	}
+	orderID, err := txRepo.CreateOrder(ctx, order)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, errors.New("订单落库失败: " + err.Error())
+	}
+	order.ID = orderID
+	if err := tx.Commit(); err != nil {
+		return nil, errors.New("事务提交失败: " + err.Error())
+	}
+
+	// 6. 上游注册（事务外）：失败 → 原子退款（先条件 UPDATE 认领订单，再回补余额）
 	opID, err := c.RegisterDomain(ctx, domain, RegisterOpts{
 		Years:             years,
 		AutoRenew:         false,
@@ -133,11 +157,18 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 		ContactRegistrant: contact.ContactID,
 	})
 	if err != nil {
-		_ = tx.Rollback()
+		p.refundOrderPaid(ctx, order, "register")
 		return nil, errors.New("Spaceship 注册失败: " + err.Error())
 	}
 
-	did, err := txRepo.CreateDomain(ctx, &DomainRow{
+	// 7. 域名/操作记录落库；失败则退款（钱不能因本地故障而悬挂）
+	tx2, err := p.host.DB.BeginTx(ctx, nil)
+	if err != nil {
+		p.refundOrderPaid(ctx, order, "register")
+		return nil, errors.New("事务开启失败（已退款）: " + err.Error())
+	}
+	tx2Repo := p.repo.WithTx(tx2)
+	did, err := tx2Repo.CreateDomain(ctx, &DomainRow{
 		UserID:          in.UserID,
 		Domain:          domain,
 		WhoisID:         sql.NullInt64{Int64: contact.ID, Valid: true},
@@ -148,28 +179,12 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 		PrivacyLevel:    p.cfg(ctx, "privacyLevel", defPrivacyLevel),
 	})
 	if err != nil {
-		_ = tx.Rollback()
-		return nil, errors.New("域名落库失败: " + err.Error())
+		_ = tx2.Rollback()
+		p.refundOrderPaid(ctx, order, "register")
+		return nil, errors.New("域名落库失败（已退款）: " + err.Error())
 	}
 
-	// 5.2 订单轨迹（对账用：扣了多少钱、是否已退）
-	orderID, err := txRepo.CreateOrder(ctx, &OrderRow{
-		DomainID:    sql.NullInt64{Int64: did, Valid: true},
-		Domain:      domain,
-		UserID:      in.UserID,
-		Kind:        "register",
-		Years:       years,
-		AmountCents: amountCents,
-		Status:      "paid",
-		Note:        sql.NullString{String: note, Valid: true},
-	})
-	if err != nil {
-		_ = tx.Rollback()
-		return nil, errors.New("订单落库失败: " + err.Error())
-	}
-	_ = orderID
-
-	if _, err := txRepo.CreateOperation(ctx, &OperationRow{
+	if _, err := tx2Repo.CreateOperation(ctx, &OperationRow{
 		OperationID: opID,
 		DomainID:    sql.NullInt64{Int64: did, Valid: true},
 		Domain:      domain,
@@ -177,12 +192,20 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 		Status:      "pending",
 		StartedAt:   time.Now(),
 	}); err != nil {
-		_ = tx.Rollback()
-		return nil, errors.New("操作记录落库失败: " + err.Error())
+		_ = tx2.Rollback()
+		p.refundOrderPaid(ctx, order, "register")
+		return nil, errors.New("操作记录落库失败（已退款）: " + err.Error())
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, errors.New("事务提交失败: " + err.Error())
+	if err := tx2Repo.UpdateOrderDomain(ctx, order.ID, did); err != nil {
+		_ = tx2.Rollback()
+		p.refundOrderPaid(ctx, order, "register")
+		return nil, errors.New("订单关联失败（已退款）: " + err.Error())
+	}
+
+	if err := tx2.Commit(); err != nil {
+		p.refundOrderPaid(ctx, order, "register")
+		return nil, errors.New("事务提交失败（已退款）: " + err.Error())
 	}
 	return &registerResult{
 		DomainID:    did,

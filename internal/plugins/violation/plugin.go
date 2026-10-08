@@ -116,6 +116,8 @@ func (p *Plugin) ConfigSchema() []plugin.ConfigField {
 			Tip: "添加违规表单中「是否公示」的默认值"},
 		{Key: "notifyUser", Title: "通知用户", Type: "switch", Default: "1",
 			Tip: "新增/实质变更违规记录时向对应用户发送站内信；开启邮件转发的站点将同步补发"},
+		{Key: "adminOpRatePerMin", Title: "管理端操作限流（次/分钟）", Type: "number", Default: "30",
+			Tip: "保存/删除等危险操作按 <管理员>|<IP>|<操作> 限流；0 表示关闭（本地开发/单管理员环境）"},
 	}
 }
 

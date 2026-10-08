@@ -586,10 +586,26 @@ func (r *Repo) CreateOrder(ctx context.Context, o *OrderRow) (int64, error) {
 	return id, err
 }
 
-// MarkOrderRefunded 标记订单已退款（失败自动退款时调用）。
-func (r *Repo) MarkOrderRefunded(ctx context.Context, id int64) error {
+// RefundOrderIfPaid 原子认领退款资格：仅当 status='paid' 时置为 refunded。
+// 返回 true 表示本调用抢到退款资格（RowsAffected==1），调用方据此才执行余额回补；
+// 并发/重复调用只有一个赢家，从根上杜绝"查单→加钱→标记"三步竞态导致的双倍退款。
+func (r *Repo) RefundOrderIfPaid(ctx context.Context, id int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE plugin_spaceship_orders SET status='refunded', updated_at=now() WHERE id=$1 AND status='paid'`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// UpdateOrderDomain 上游受理后回填订单 domain_id（注册订单创建时域名尚未落库）。
+func (r *Repo) UpdateOrderDomain(ctx context.Context, orderID, domainID int64) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE plugin_spaceship_orders SET status='refunded', updated_at=now() WHERE id=$1`, id)
+		`UPDATE plugin_spaceship_orders SET domain_id=$1, updated_at=now() WHERE id=$2`, domainID, orderID)
 	return err
 }
 

@@ -65,13 +65,18 @@ func TestNotifyUser_DefaultOnSendsMessage(t *testing.T) {
 	if msg.userID != 42 || msg.title != notifyTitleCreated {
 		t.Fatalf("通知目标/标题错误: %+v", msg)
 	}
-	for _, want := range []string{"垃圾邮件", "中度", "暂停服务", "2026-09-01 08:00 至 2026-10-01 08:00", "https://cdn.example.com/e.png", "申诉"} {
+	for _, want := range []string{"垃圾邮件", "中度", "暂停服务", "2026-09-01 08:00 至 2026-10-01 08:00", "申诉"} {
 		if !strings.Contains(msg.body, want) {
 			t.Fatalf("正文缺少 %q:\n%s", want, msg.body)
 		}
 	}
 	if strings.Contains(msg.body, "内部备注") {
 		t.Fatalf("正文泄露管理员内部备注:\n%s", msg.body)
+	}
+	// evidence_url 多为后台内部凭据/材料链接（JSON 接口对非管理员已收敛），
+	// 不得经站内信原文直达被处置用户。
+	if strings.Contains(msg.body, "https://cdn.example.com/e.png") || strings.Contains(msg.body, "举证材料") {
+		t.Fatalf("正文泄露内部举证链接:\n%s", msg.body)
 	}
 }
 

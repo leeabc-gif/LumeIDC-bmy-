@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -189,14 +190,15 @@ func TestConfigSchema(t *testing.T) {
 		keys[f.Key] = f.Type
 	}
 	want := map[string]string{
-		"apiKey":          "text",
-		"apiSecret":       "password",
-		"defaultYears":    "number",
-		"privacyLevel":    "select",
-		"pollIntervalSec": "number",
-		"enableNotify":    "switch",
-		"allowPremium":    "switch",
-		"refundOnFailure": "switch",
+		"apiKey":             "text",
+		"apiSecret":          "password",
+		"defaultYears":       "number",
+		"privacyLevel":       "select",
+		"pollIntervalSec":    "number",
+		"enableNotify":       "switch",
+		"allowPremium":       "switch",
+		"refundOnFailure":    "switch",
+		"adminOpRatePerMin":  "number",
 	}
 	for k, typ := range want {
 		if keys[k] != typ {
@@ -215,6 +217,9 @@ func TestConfigSchema(t *testing.T) {
 	}
 	if defaults["defaultYears"] != defDefaultYears || defaults["pollIntervalSec"] != defPollIntervalSec {
 		t.Fatalf("数字项默认值错误: %v", defaults)
+	}
+	if defaults["adminOpRatePerMin"] != strconv.Itoa(defAdminOpRate) {
+		t.Fatalf("限流默认值错误: %v", defaults)
 	}
 	// select 选项须严格等于官方支持的两档：high（高隐私，推荐）与 public。
 	// 早期提供的 medium/low 已被官方移除，传入会被判 400（P1-7 回归）。

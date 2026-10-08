@@ -31,6 +31,12 @@ func NewRateLimiter() *RateLimiter {
 	}
 }
 
+// maxBuckets 键数上界：键含客户端可伪造的 XFF 首段，若无上界，持会话者可用
+// 随机 XFF 无限制造新键撑大内存。达到上限时惰性清除"整桶已滑出窗口"的键
+// （ponytail: O(n) 全表扫描仅在达到上界时触发，活跃键最多 4096 个，代价可忽略；
+// 若未来需支持更大键规模，应升级为带 LRU 或定时清扫的实现）。
+const maxBuckets = 4096
+
 // Allow 记录一次访问并判断是否在限额内。返回 (allowed, retryAfter)；
 // 被拒时 retryAfter 表示窗口腾出空位还需等待多久（配合 429 + Retry-After 头）。
 // max <= 0 表示该 key 不限流。
@@ -42,6 +48,15 @@ func (l *RateLimiter) Allow(key string, max int) (bool, time.Duration) {
 	cutoff := now.Add(-l.window)
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// 键数达到上界时做一次惰性清理，防止伪造键撑爆内存
+	if _, ok := l.buckets[key]; !ok && len(l.buckets) >= maxBuckets {
+		for k, v := range l.buckets {
+			// 时间升序，末尾即最新一条；最新一条已滑出窗口 → 整桶过期
+			if len(v) == 0 || !v[len(v)-1].After(cutoff) {
+				delete(l.buckets, k)
+			}
+		}
+	}
 	ts := l.buckets[key]
 	// 丢弃窗口外的旧记录（时间升序，从前向后找首个在窗内的）
 	i := 0

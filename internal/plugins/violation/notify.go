@@ -32,7 +32,9 @@ func (p *Plugin) notifyUser(ctx context.Context, userID int64, title, body strin
 }
 
 // violationCreatedBody 新增违规通知正文：只陈述与用户权益相关的事实
-// （类型/等级/措施/有效期/举证），不含管理员内部备注。
+// （类型/等级/措施/有效期），不含管理员内部备注，也不含 evidence_url——
+// 该字段多为后台内部凭据/材料链接（JSON 接口已对非管理员收敛），
+// 不得经站内信原文直达被处置用户。
 func violationCreatedBody(rec *Record) string {
 	var b strings.Builder
 	b.WriteString("您的账户新增一条违规记录：\n")
@@ -40,9 +42,6 @@ func violationCreatedBody(rec *Record) string {
 	b.WriteString("违规等级：" + levelLabel(rec.Level) + "\n")
 	b.WriteString("处置措施：" + valueOr(rec.Action, "无") + "\n")
 	b.WriteString("有效期：" + validityText(rec.StartsAt, rec.ExpiresAt))
-	if u := strings.TrimSpace(rec.EvidenceURL); u != "" {
-		b.WriteString("\n举证材料：" + u)
-	}
 	b.WriteString("\n如有异议，请联系管理员申诉。")
 	return b.String()
 }

@@ -147,11 +147,19 @@ const registerForm = reactive({
 const registerQuote = ref<{
   amount: string
   amountCents: number
+  unitCents: number // 单年价（分）：报价按查询时年限给出，弹窗内改年限需按单价重算
   premium: boolean
   premiumPrice?: number
   currency: string
   sellable: boolean
 } | null>(null)
+
+// 弹窗内年限可调，应付金额按单价 × 当前年限实时换算（后端提交时仍会重算扣款）
+const registerAmountText = computed(() => {
+  const q = registerQuote.value
+  if (!q || !q.unitCents) return ''
+  return ((q.unitCents * registerForm.years) / 100).toFixed(2)
+})
 
 async function doCheck() {
   const parts = searchInput.value
@@ -200,6 +208,7 @@ async function openRegister(item: CheckItem) {
   registerQuote.value = {
     amount: item.listPrice || '',
     amountCents: item.listPriceCents || 0,
+    unitCents: searchYears.value > 0 ? Math.round((item.listPriceCents || 0) / searchYears.value) : item.listPriceCents || 0,
     premium: !!item.premium,
     premiumPrice: item.price,
     currency: '',
@@ -840,8 +849,8 @@ onMounted(() => {
           <el-input-number v-model="registerForm.years" :min="1" :max="10" style="width: 140px" />
         </el-form-item>
         <el-form-item label="应付金额" required>
-          <div v-if="registerQuote?.amount">
-            <span class="quote-price">￥{{ registerQuote.amount }}</span>
+          <div v-if="registerAmountText">
+            <span class="quote-price">￥{{ registerAmountText }}</span>
             <span class="search-tip">（{{ registerForm.years }} 年，按价目表计算，提交后从账户余额扣减）</span>
           </div>
           <div v-else class="search-tip">该后缀暂未上架，无法自助注册</div>

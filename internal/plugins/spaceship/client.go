@@ -168,6 +168,10 @@ func (c *Client) CheckOne(ctx context.Context, domain string) (*CheckResult, err
 	if err != nil {
 		return nil, err
 	}
+	// 上游 200 + 空 body 时不会反序列化，out 保持 nil；调用方直接取字段会 panic。
+	if out == nil {
+		return nil, fmt.Errorf("Spaceship 可用性查询返回空响应")
+	}
 	return out, nil
 }
 
@@ -335,6 +339,9 @@ func (c *Client) GetOperation(ctx context.Context, operationID string) (*Operati
 	if err != nil {
 		return nil, err
 	}
+	if out == nil {
+		return nil, fmt.Errorf("Spaceship 异步操作查询返回空响应")
+	}
 	return out, nil
 }
 
@@ -377,6 +384,9 @@ func (c *Client) GetDomain(ctx context.Context, domain string) (*DomainInfo, err
 	_, err := c.do(ctx, http.MethodGet, "/domains/"+url.PathEscape(domain), nil, &out)
 	if err != nil {
 		return nil, err
+	}
+	if out == nil {
+		return nil, fmt.Errorf("Spaceship 域名详情返回空响应")
 	}
 	return out, nil
 }

@@ -1359,11 +1359,13 @@ async function flowRefund({ adminPage, customerPage, marker }) {
     const noExpired = !orders.some((o) => o.id === ORDER_EXPIRED)
     const refundable = hit ? parseFloat(hit.refundable) : NaN
     base = hit && Number.isFinite(refundable) ? toCents(hit.refundable) : null
-    const ok = !!(r.json && String(r.json.ok) === '1' && hit && noExpired && refundable > 0
-      && (paidBase === null || refundable <= paidBase / 100 + 0.001))
+    // 上界断言：复位成功时对实付基线；psql 不可用（paidBase=null）时退回静态
+    // 上限 10.00 兜底——QA 订单 #475 实付固定，若环境被改动此处会显式失败而非静默放大。
+    const upperOk = paidBase !== null ? refundable <= paidBase / 100 + 0.001 : refundable <= 10.001
+    const ok = !!(r.json && String(r.json.ok) === '1' && hit && noExpired && refundable > 0 && upperOk)
     check('R-01a', 'P0', '可退订单口径（窗口内已支付可见、超窗隐藏）', ok,
       `含#${ORDER_MAIN}:${hit ? `refundable=${hit.refundable}` : '缺'} 不含#${ORDER_EXPIRED}:${noExpired}`
-      + (paidBase !== null ? ` 实付基线=${cents(paidBase)}` : ''))
+      + (paidBase !== null ? ` 实付基线=${cents(paidBase)}` : '（psql 不可用，静态上限 10.00 兜底）'))
     note('R-01a 表单选项', `reasons=${eligibleReasons.length} 项 methods=${JSON.stringify((r.json && r.json.methods) || [])}`)
   }
   // 复位成功且实付已知时做一次交叉校验：实时可退应恰等于实付
@@ -2942,8 +2944,10 @@ async function flowSpaceship({ adminPage, customerPage, marker }) {
           { domain: `qa-s09-${marker}.test`, years: 1, contactId: 0, userId: myId })
         const after = (psql(balSql) || '0').trim()
         const noDom = psql(`SELECT count(*) FROM plugin_spaceship_domains WHERE domain LIKE 'qa-s09-%'`)
+        // 判据必须是「确定性的预检拒绝」文案；不能宽泛到含"失败/错误"——
+        // 那会把上游已受理后才发现的异常也当安全拒绝，掩盖资损型缺陷。
         const safeReject = reg.status === 200 && reg.json && reg.json.ok === 0 &&
-          /未配置|未启用|价格|请指定|不存在|不支持|失败|错误/.test((reg.json && reg.json.msg) || reg.text)
+          /未配置|未启用|价格|请指定|不存在|不支持|溢价/.test((reg.json && reg.json.msg) || reg.text)
         check('S-09', 'P0', '后台代注册资金一致性（无凭证安全拒绝 + 余额零变动）',
           safeReject && after === before && Number(noDom) === 0,
           `ok=${reg.json && reg.json.ok} msg=${(reg.json && reg.json.msg) || reg.text.slice(0, 40)}；余额 ${before}→${after}；qa-s09 域名数=${noDom}`)

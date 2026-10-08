@@ -194,6 +194,61 @@ func TestP0_Register_UpstreamFailureMustRefund(t *testing.T) {
 	}
 }
 
+// P1 轮询发现异步失败 → 真实退款链路：认领订单 + 回补余额必须在真库跑通，
+// 且重复退款（并发/人工重试）不得双倍入账（RefundOrderIfPaid 条件 UPDATE 认领）。
+func TestP1_PollFailed_RefundsRealOrderIdempotently(t *testing.T) {
+	up := newFakeUpstream()
+	defer up.Close()
+	withFakeUpstream(t, up)
+	p, d := newTestPlugin(t, up, nil)
+
+	uid := createTestUser(t, d, "pollrefund", "100.00")
+	did := insertActiveDomain(t, d, uid, "pollrefund-p1.com", time.Now().AddDate(1, 0, 0))
+
+	// 模拟已扣款：余额 100.00 - 88.00 = 12.00；订单记录 8800 分
+	if _, err := d.ExecContext(context.Background(),
+		`UPDATE users SET balance = balance - 88 WHERE id=$1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(context.Background(),
+		`INSERT INTO plugin_spaceship_orders (domain_id,domain,user_id,kind,years,amount_cents,status)
+		 VALUES($1,'pollrefund-p1.com',$2,'register',1,8800,'paid')`, did, uid); err != nil {
+		t.Fatal(err)
+	}
+
+	const opIDStr = "op-failed-refund-1"
+	if _, err := d.ExecContext(context.Background(),
+		`INSERT INTO plugin_spaceship_operations (operation_id,domain_id,domain,op_type,status,started_at)
+		 VALUES($1,$2,'pollrefund-p1.com','domain_create','pending',now())`, opIDStr, did); err != nil {
+		t.Fatal(err)
+	}
+	up.SetOpStatus(opIDStr, "failed")
+
+	if err := p.pollOperations(context.Background()); err != nil {
+		t.Fatalf("轮询不应报错: %v", err)
+	}
+
+	var status string
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT status FROM plugin_spaceship_operations WHERE operation_id=$1`, opIDStr).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("上游 failed 应落库为 failed: %s", status)
+	}
+	if got := balanceOf(t, d, uid); got != 10000 {
+		t.Errorf("P1 资金悬挂：异步失败退款后余额应=10000 分，got %d", got)
+	}
+
+	// 幂等：同一 op 再触发一次退款（模拟 cron 与人工并发），不得双倍入账
+	p.refundByDomainOperation(context.Background(), &OperationRow{
+		DomainID: sql.NullInt64{Int64: did, Valid: true}, OpType: "domain_create",
+	})
+	if got := balanceOf(t, d, uid); got != 10000 {
+		t.Errorf("P0 双倍退款：重复退款后余额=%d 分（应仍为 10000）", got)
+	}
+}
+
 // =====================================================================
 // P0-4 共享联系人越权：普通用户可删除/占用管理员共享联系人（user_id IS NULL）
 // 期望：共享模板对普通用户只读，删除与设为默认均需拒绝
