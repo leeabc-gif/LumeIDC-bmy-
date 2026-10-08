@@ -17,6 +17,9 @@ import (
 
 const Name = "violation"
 
+// defAdminOpRate 管理端操作限流默认值（checkAdminRate 兜底与 ConfigSchema 展示共用）。
+const defAdminOpRate = 30
+
 // 插件事件（供 webhooknotify 等订阅）。
 const (
 	EventViolationCreated = "violation.created"
@@ -67,7 +70,7 @@ func (p *Plugin) limiter() *plugin.RateLimiter {
 // 限流强度取插件配置 adminOpRatePerMin（<=0 表示关闭，本地开发/单管理员机房）；
 // 键为 <adminID>|<ip>|<op>，限额语义详见 plugin.RateLimiter.AllowAdmin。
 func (p *Plugin) checkAdminRate(r *http.Request, adminID int64, op string) (bool, time.Duration) {
-	rate := 30
+	rate := defAdminOpRate
 	if v := strings.TrimSpace(p.host.Config(r.Context(), "adminOpRatePerMin")); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			rate = n
@@ -116,7 +119,7 @@ func (p *Plugin) ConfigSchema() []plugin.ConfigField {
 			Tip: "添加违规表单中「是否公示」的默认值"},
 		{Key: "notifyUser", Title: "通知用户", Type: "switch", Default: "1",
 			Tip: "新增/实质变更违规记录时向对应用户发送站内信；开启邮件转发的站点将同步补发"},
-		{Key: "adminOpRatePerMin", Title: "管理端操作限流（次/分钟）", Type: "number", Default: "30",
+		{Key: "adminOpRatePerMin", Title: "管理端操作限流（次/分钟）", Type: "number", Default: strconv.Itoa(defAdminOpRate),
 			Tip: "保存/删除等危险操作按 <管理员>|<IP>|<操作> 限流；0 表示关闭（本地开发/单管理员环境）"},
 	}
 }

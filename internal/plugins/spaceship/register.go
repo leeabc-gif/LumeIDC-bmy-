@@ -148,6 +148,11 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 		return nil, errors.New("事务提交失败: " + err.Error())
 	}
 
+	// 钱已扣：此后所有路径（上游调用/退款/落库）必须脱离请求 ctx——
+	// 客户端断开会取消 r.Context()，退款若随 ctx 失败，订单将滞留 paid
+	// 且无 operation 行供 cron 补救，形成资金悬挂。
+	ctx = context.WithoutCancel(ctx)
+
 	// 6. 上游注册（事务外）：失败 → 原子退款（先条件 UPDATE 认领订单，再回补余额）
 	opID, err := c.RegisterDomain(ctx, domain, RegisterOpts{
 		Years:             years,
@@ -161,10 +166,11 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 		return nil, errors.New("Spaceship 注册失败: " + err.Error())
 	}
 
-	// 7. 域名/操作记录落库；失败则退款（钱不能因本地故障而悬挂）
+	// 7. 域名/操作记录落库；失败则退款（钱不能因本地故障而悬挂），上游已受理须留痕对账
 	tx2, err := p.host.DB.BeginTx(ctx, nil)
 	if err != nil {
 		p.refundOrderPaid(ctx, order, "register")
+		p.reportOrphanUpstream(ctx, order, opID, "register", "事务开启失败")
 		return nil, errors.New("事务开启失败（已退款）: " + err.Error())
 	}
 	tx2Repo := p.repo.WithTx(tx2)
@@ -181,6 +187,7 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 	if err != nil {
 		_ = tx2.Rollback()
 		p.refundOrderPaid(ctx, order, "register")
+		p.reportOrphanUpstream(ctx, order, opID, "register", err.Error())
 		return nil, errors.New("域名落库失败（已退款）: " + err.Error())
 	}
 
@@ -194,17 +201,20 @@ func (p *Plugin) registerInternal(ctx context.Context, c *Client, in registerInp
 	}); err != nil {
 		_ = tx2.Rollback()
 		p.refundOrderPaid(ctx, order, "register")
+		p.reportOrphanUpstream(ctx, order, opID, "register", err.Error())
 		return nil, errors.New("操作记录落库失败（已退款）: " + err.Error())
 	}
 
 	if err := tx2Repo.UpdateOrderDomain(ctx, order.ID, did); err != nil {
 		_ = tx2.Rollback()
 		p.refundOrderPaid(ctx, order, "register")
+		p.reportOrphanUpstream(ctx, order, opID, "register", err.Error())
 		return nil, errors.New("订单关联失败（已退款）: " + err.Error())
 	}
 
 	if err := tx2.Commit(); err != nil {
 		p.refundOrderPaid(ctx, order, "register")
+		p.reportOrphanUpstream(ctx, order, opID, "register", "事务提交失败")
 		return nil, errors.New("事务提交失败（已退款）: " + err.Error())
 	}
 	return &registerResult{

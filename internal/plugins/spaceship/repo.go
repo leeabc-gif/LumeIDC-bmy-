@@ -367,6 +367,16 @@ func (r *Repo) ListPending(ctx context.Context, limit int) ([]*OperationRow, err
 	return out, rows.Err()
 }
 
+// HasPendingOp 同域同类型是否已有 pending 异步操作（续费防重预检；
+// 硬保证由迁移 003 的部分唯一索引兜底，此处仅用于给出友好的前置拒绝）。
+func (r *Repo) HasPendingOp(ctx context.Context, domainID int64, opType string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM plugin_spaceship_operations
+		 WHERE domain_id=$1 AND op_type=$2 AND status='pending')`, domainID, opType).Scan(&exists)
+	return exists, err
+}
+
 func scanOp(row interface{ Scan(...any) error }) (*OperationRow, error) {
 	var out OperationRow
 	err := row.Scan(&out.ID, &out.OperationID, &out.DomainID, &out.Domain, &out.OpType,
@@ -424,9 +434,10 @@ func (r *Repo) MarkPendingRetried(ctx context.Context, id int64) (bool, error) {
 	return n > 0, nil
 }
 
-// UpdateOpDomain 注册成功后把 domain_id 关联上（CreateOperation 时 domain_id 还未知）。
-func (r *Repo) UpdateOpDomain(ctx context.Context, opID, domainID int64) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE plugin_spaceship_operations SET domain_id=$1 WHERE id=$2`, domainID, opID)
+// SetOrderNote 覆写订单备注（对账留痕用：上游已受理但本地落库失败时写入 opID）。
+func (r *Repo) SetOrderNote(ctx context.Context, id int64, note string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE plugin_spaceship_orders SET note=$1, updated_at=now() WHERE id=$2`, note, id)
 	return err
 }
 

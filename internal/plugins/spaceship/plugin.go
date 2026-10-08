@@ -90,7 +90,7 @@ type repoStore interface {
 	MarkSuccess(ctx context.Context, id int64, result any) error
 	MarkFailed(ctx context.Context, id int64, errMsg string, result any) error
 	MarkPendingRetried(ctx context.Context, id int64) (bool, error)
-	UpdateOpDomain(ctx context.Context, opID, domainID int64) error
+	HasPendingOp(ctx context.Context, domainID int64, opType string) (bool, error)
 	ListOperations(ctx context.Context, limit, offset int) ([]*OperationRow, error)
 	CountOperations(ctx context.Context) (int, error)
 	GetPrice(ctx context.Context, tld string) (*PriceRow, error)
@@ -100,6 +100,7 @@ type repoStore interface {
 	CreateOrder(ctx context.Context, o *OrderRow) (int64, error)
 	RefundOrderIfPaid(ctx context.Context, id int64) (bool, error)
 	UpdateOrderDomain(ctx context.Context, orderID, domainID int64) error
+	SetOrderNote(ctx context.Context, id int64, note string) error
 	LatestPaidOrder(ctx context.Context, domainID int64, kind string) (*OrderRow, error)
 	ListOrders(ctx context.Context, userID sql.NullInt64, limit, offset int) ([]*OrderRow, error)
 	WithTx(tx *sql.Tx) repoStore

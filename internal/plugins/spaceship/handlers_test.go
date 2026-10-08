@@ -249,6 +249,50 @@ func TestP1_PollFailed_RefundsRealOrderIdempotently(t *testing.T) {
 	}
 }
 
+// P1 轮询超时（pending >15min）→ 真库退款链路：标 failed + 订单认领 + 余额回补。
+func TestP1_PollTimeout_RefundsRealOrder(t *testing.T) {
+	up := newFakeUpstream()
+	defer up.Close()
+	withFakeUpstream(t, up)
+	p, d := newTestPlugin(t, up, nil)
+
+	uid := createTestUser(t, d, "timeoutref", "100.00")
+	did := insertActiveDomain(t, d, uid, "timeoutref-p1.com", time.Now().AddDate(1, 0, 0))
+
+	if _, err := d.ExecContext(context.Background(),
+		`UPDATE users SET balance = balance - 88 WHERE id=$1`, uid); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ExecContext(context.Background(),
+		`INSERT INTO plugin_spaceship_orders (domain_id,domain,user_id,kind,years,amount_cents,status)
+		 VALUES($1,'timeoutref-p1.com',$2,'renew',1,8800,'paid')`, did, uid); err != nil {
+		t.Fatal(err)
+	}
+	// 超出 15min 窗口的 pending 续费操作；fake 上游默认返回 pending
+	if _, err := d.ExecContext(context.Background(),
+		`INSERT INTO plugin_spaceship_operations (operation_id,domain_id,domain,op_type,status,started_at)
+		 VALUES('op-timeout-1',$1,'timeoutref-p1.com','domain_renew','pending',$2)`,
+		did, time.Now().Add(-16*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.pollOperations(context.Background()); err != nil {
+		t.Fatalf("轮询不应报错: %v", err)
+	}
+
+	var status string
+	if err := d.QueryRowContext(context.Background(),
+		`SELECT status FROM plugin_spaceship_operations WHERE operation_id='op-timeout-1'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("超时应标 failed: %s", status)
+	}
+	if got := balanceOf(t, d, uid); got != 10000 {
+		t.Errorf("P1 资金悬挂：超时退款后余额应=10000 分，got %d", got)
+	}
+}
+
 // =====================================================================
 // P0-4 共享联系人越权：普通用户可删除/占用管理员共享联系人（user_id IS NULL）
 // 期望：共享模板对普通用户只读，删除与设为默认均需拒绝

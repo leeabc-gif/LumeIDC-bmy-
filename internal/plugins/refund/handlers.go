@@ -242,7 +242,9 @@ func (p *Plugin) adminReject(w http.ResponseWriter, r *http.Request) {
 		if note != "" {
 			body += "原因：" + note
 		}
-		_ = p.host.Notify.Notify(ctx, req.UserID, "退款申请未通过", body)
+		if err := p.host.Notify.Notify(ctx, req.UserID, "退款申请未通过", body); err != nil {
+			log.Printf("[refund] 驳回结果通知用户失败 req=%d user=%d: %v", req.ID, req.UserID, err)
+		}
 	}
 	// 多渠道机器人通知。
 	rejectMsg := fmt.Sprintf("订单 #%d 的退款申请已驳回\n金额：%s 元", req.OrderID, req.Amount)
@@ -339,7 +341,9 @@ func (p *Plugin) approveFlow(ctx context.Context, req *Request, admin sql.NullIn
 	if p.cfgBool(ctx, "notifyUserOnResult", true) && p.host.Notify != nil {
 		body := fmt.Sprintf("您对订单 #%d 的退款申请（%s 元）已通过审核并完成退款。%s",
 			req.OrderID, req.Amount, feeNote)
-		_ = p.host.Notify.Notify(ctx, req.UserID, "退款申请已通过", body)
+		if err := p.host.Notify.Notify(ctx, req.UserID, "退款申请已通过", body); err != nil {
+			log.Printf("[refund] 通过结果通知用户失败 req=%d user=%d: %v", req.ID, req.UserID, err)
+		}
 	}
 	// 多渠道机器人通知。
 	notifyMsg := fmt.Sprintf("订单 #%d 的退款申请已通过\n金额：%s 元", req.OrderID, req.Amount)

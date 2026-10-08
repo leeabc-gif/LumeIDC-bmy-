@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -136,5 +137,47 @@ func TestClientIP(t *testing.T) {
 	r.Header.Set("X-Real-IP", "5.6.7.8")
 	if got := ClientIP(r); got != "1.1.1.1" {
 		t.Fatalf("X-Forwarded-For 应优先，got %q", got)
+	}
+	// '|' 是 AllowAdmin 键分隔符，必须从 IP 中剔除，防伪造 XFF 拼出他人限流键
+	r = httptest.NewRequest("GET", "/x", nil)
+	r.Header.Set("X-Forwarded-For", "5|1.2.3.4")
+	if got := ClientIP(r); got != "51.2.3.4" {
+		t.Fatalf("XFF 中的 '|' 应被剔除，got %q", got)
+	}
+	r = httptest.NewRequest("GET", "/x", nil)
+	r.Header.Set("X-Real-IP", "5|1.2.3.4")
+	if got := ClientIP(r); got != "51.2.3.4" {
+		t.Fatalf("X-Real-IP 中的 '|' 应被剔除，got %q", got)
+	}
+}
+
+// 键数达到 maxBuckets 上界时惰性清理整桶过期的键：既验证内存有上界，
+// 也验证活跃桶（窗口内仍有记录）不被误删。
+func TestRateLimiter_LazyCleanupAtCapacity(t *testing.T) {
+	l := NewRateLimiter()
+	l.window = 20 * time.Millisecond // 缩短窗口便于测试过期
+	// 填满 maxBuckets 个键（全部活跃）
+	for i := 0; i < maxBuckets; i++ {
+		if ok, _ := l.Allow(fmt.Sprintf("k%d", i), 1000); !ok {
+			t.Fatalf("键 %d 应放行", i)
+		}
+	}
+	if len(l.buckets) != maxBuckets {
+		t.Fatalf("填满后键数应=%d，got %d", maxBuckets, len(l.buckets))
+	}
+	// 新键触发清理：旧键全部在窗口内（活跃），不应被误删，新键仍可写入
+	if ok, _ := l.Allow("fresh-1", 1000); !ok {
+		t.Fatal("达到上界时新键应仍可写入")
+	}
+	if len(l.buckets) < maxBuckets {
+		t.Fatalf("活跃桶不得被清理，got %d", len(l.buckets))
+	}
+	// 等窗口滑过后再写新键：旧整桶过期应被清掉，键数回落
+	time.Sleep(40 * time.Millisecond)
+	if ok, _ := l.Allow("fresh-2", 1000); !ok {
+		t.Fatal("过期清理后新键应可写入")
+	}
+	if len(l.buckets) >= maxBuckets {
+		t.Fatalf("过期桶应被清理，键数=%d", len(l.buckets))
 	}
 }

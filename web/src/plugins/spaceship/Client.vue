@@ -16,6 +16,9 @@ interface CheckItem {
   listPrice?: string
   listPriceCents?: number
   sellable?: boolean
+  // 询价时的年限快照：listPriceCents 是「单价×该年限」的总价，
+  // 用户询价后改年限再点注册时，金额换算必须用这个分母而非当前 searchYears
+  quoteYears?: number
 }
 
 interface PriceRow {
@@ -184,7 +187,9 @@ async function doCheck() {
       ElMessage.error(res.msg || '查询失败')
       return
     }
-    checkResults.value = res.list || []
+    // 快照询价年限：后续金额换算的分母以询价时点为准
+    const years = searchYears.value
+    checkResults.value = (res.list || []).map((x) => ({ ...x, quoteYears: years }))
     if (!checkResults.value.length) ElMessage.info('未查询到结果')
   } catch (err: unknown) {
     ElMessage.error((err as Error).message || '查询失败')
@@ -203,12 +208,14 @@ function resultLabel(item: CheckItem): { text: string; type: 'info' | 'warning' 
 
 async function openRegister(item: CheckItem) {
   registerForm.domain = item.domain
-  registerForm.years = searchYears.value
+  // 年限与单价分母都以询价时点的快照为准，避免用户询价后改 searchYears 导致金额错位
+  const quoteYears = item.quoteYears || searchYears.value
+  registerForm.years = quoteYears
   registerForm.contactId = contacts.value.find((c) => c.isDefault)?.id ?? contacts.value[0]?.id ?? 0
   registerQuote.value = {
     amount: item.listPrice || '',
     amountCents: item.listPriceCents || 0,
-    unitCents: searchYears.value > 0 ? Math.round((item.listPriceCents || 0) / searchYears.value) : item.listPriceCents || 0,
+    unitCents: quoteYears > 0 ? Math.round((item.listPriceCents || 0) / quoteYears) : item.listPriceCents || 0,
     premium: !!item.premium,
     premiumPrice: item.price,
     currency: '',

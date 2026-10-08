@@ -286,8 +286,10 @@ func TestPollOneRenewSuccessBackfillsExpiry(t *testing.T) {
 	if fr.patches[0].id != 9 {
 		t.Fatalf("应回填对应域名 id=9: %+v", fr.patches[0])
 	}
-	if _, ok := fr.patches[0].patches["expires_at"].(time.Time); !ok {
-		t.Fatalf("expires_at 应为 time.Time: %+v", fr.patches[0].patches)
+	// 必须精确等于上游返回的到期时间（防止误写 time.Now() 之类也能通过）
+	want, _ := time.Parse(time.RFC3339, "2027-06-01T00:00:00Z")
+	if got, ok := fr.patches[0].patches["expires_at"].(time.Time); !ok || !got.Equal(want) {
+		t.Fatalf("expires_at 应=%v，got %v", want, fr.patches[0].patches["expires_at"])
 	}
 }
 

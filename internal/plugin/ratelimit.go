@@ -44,10 +44,12 @@ func (l *RateLimiter) Allow(key string, max int) (bool, time.Duration) {
 	if max <= 0 {
 		return true, 0
 	}
-	now := time.Now()
-	cutoff := now.Add(-l.window)
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// 时间基准必须在锁内采样：锁外采样在并发下会产生同桶时间戳乱序，
+	// 破坏"末元素最新"的假设，导致惰性清理误删仍活跃的桶。
+	now := time.Now()
+	cutoff := now.Add(-l.window)
 	// 键数达到上界时做一次惰性清理，防止伪造键撑爆内存
 	if _, ok := l.buckets[key]; !ok && len(l.buckets) >= maxBuckets {
 		for k, v := range l.buckets {
@@ -95,15 +97,17 @@ func (l *RateLimiter) AllowAdmin(r *http.Request, maxPerMin int, adminID int64, 
 // 回退 X-Real-IP，最后 RemoteAddr（去端口）。
 // 注意：直连暴露时 X-Forwarded-For 可被客户端伪造，故限流键只用于防误操作
 // 与粗粒度防刷，不能作为安全边界；权限判定始终走服务端会话。
+// 返回值会剔除 '|'：该字符是 AllowAdmin 键的分隔符，不过滤时可被伪造
+// XFF 拼出与其他键相同的限流键（跨键污染配额）。
 func ClientIP(r *http.Request) string {
 	if v := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); v != "" {
 		if i := strings.IndexByte(v, ','); i >= 0 {
 			v = v[:i]
 		}
-		return strings.TrimSpace(v)
+		return strings.ReplaceAll(strings.TrimSpace(v), "|", "")
 	}
 	if v := strings.TrimSpace(r.Header.Get("X-Real-IP")); v != "" {
-		return v
+		return strings.ReplaceAll(v, "|", "")
 	}
 	host := r.RemoteAddr
 	if i := strings.LastIndexByte(host, ':'); i >= 0 {

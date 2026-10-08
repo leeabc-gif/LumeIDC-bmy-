@@ -172,8 +172,15 @@ const registerForm = reactive({
   contactId: 0,
   allowPremium: false,
 })
-// 服务端实时报价（金额不再由后台手填，一律由价目表决定）
+// 服务端报价（1 年单价，来自价目表）；弹窗内年限可调，金额按 unitCents × years 换算
 const registerQuote = ref<{ amount: string; amountCents: number; premium: boolean; premiumPrice?: number; currency?: string; available: boolean; result: string } | null>(null)
+
+// 后台注册弹窗应付金额：adminCheck 报价为 1 年单价，乘以所选年限实时换算（后端提交时仍重算）
+const registerAmountText = computed(() => {
+  const q = registerQuote.value
+  if (!q || !q.amountCents) return ''
+  return ((q.amountCents * registerForm.years) / 100).toFixed(2)
+})
 
 // 按当前域名向服务端询价（后台价目表 + SpaceShip 溢价标记）
 async function quoteRegister() {
@@ -187,9 +194,11 @@ async function quoteRegister() {
     const res = await http.post<{ ok: number; msg?: string; item?: CheckItem }>('/plugin/spaceship/check', {
       domain,
     })
+    // 竞态守卫：慢响应返回时域名已被改，丢弃过期报价（否则显示旧域名价格）
+    if (registerForm.domain.trim().toLowerCase() !== domain) return
     if (String(res.ok) !== '1' || !res.item) {
       registerQuote.value = null
-      ElMessage.warning(res.msg || '询价失败，请检查 Spaceship API 配置')
+      ElMessage.warning({ message: res.msg || '询价失败，请检查 Spaceship API 配置', grouping: true })
       return
     }
     registerQuote.value = {
@@ -205,9 +214,10 @@ async function quoteRegister() {
       registerForm.allowPremium = false
     }
   } catch (err: unknown) {
+    if (registerForm.domain.trim().toLowerCase() !== domain) return
     registerQuote.value = null
     // 询价失败不能静默：否则管理员以为域名可用，直接提交会被后端拒绝
-    ElMessage.warning((err as Error).message || '询价失败，请检查 Spaceship API 配置')
+    ElMessage.warning({ message: (err as Error).message || '询价失败，请检查 Spaceship API 配置', grouping: true })
   } finally {
     registerChecking.value = false
   }
@@ -317,7 +327,13 @@ async function submitRenew() {
   }
 }
 
+// 自动续费切换 in-flight 守卫：防连点向上游重复发指令（行级 loading 在表格
+// formatter 中无法可靠触发重渲染，故用函数内守卫拦截）
+const autoRenewInFlight = new Set<number>()
+
 async function toggleAutoRenew(row: DomainRow, val: boolean) {
+  if (autoRenewInFlight.has(row.id)) return
+  autoRenewInFlight.add(row.id)
   try {
     const res = await http.post<{ ok: number; msg?: string }>(
       `/plugin/spaceship/domains/${row.id}/autorenew`,
@@ -331,6 +347,7 @@ async function toggleAutoRenew(row: DomainRow, val: boolean) {
   } catch (err: unknown) {
     ElMessage.error((err as Error).message || '设置失败')
   } finally {
+    autoRenewInFlight.delete(row.id)
     loadDomains()
   }
 }
@@ -1021,8 +1038,9 @@ onMounted(() => {
         <el-form-item label="服务端报价">
           <div v-if="registerChecking" class="text-g-500 text-xs">正在询价…</div>
           <div v-else-if="registerQuote">
-            <span class="quote-price">¥{{ registerQuote.amount }}</span>
+            <span class="quote-price">¥{{ registerAmountText }}</span>
             <span class="text-g-500 ml-2 text-xs">
+              {{ registerForm.years }} 年 ·
               {{ registerQuote.available ? '可注册' : `不可注册（${registerQuote.result}）` }}
             </span>
           </div>

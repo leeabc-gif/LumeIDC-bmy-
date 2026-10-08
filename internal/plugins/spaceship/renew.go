@@ -58,6 +58,16 @@ func (p *Plugin) renewInternal(ctx context.Context, c *Client, in renewInput) (*
 		return nil, errors.New("仅 active（已注册成功）的域名可续费，当前状态：" + d.Status)
 	}
 
+	// 0. 同域防重：已有 pending 续费操作时前置拒绝（硬保证见迁移 003 的部分唯一索引）。
+	//    否则并发续费一败一成时，败者按 LatestPaidOrder 认领可能退掉成功那笔的订单。
+	pending, err := p.repo.HasPendingOp(ctx, d.ID, "domain_renew")
+	if err != nil {
+		return nil, errors.New("续费状态查询失败: " + err.Error())
+	}
+	if pending {
+		return nil, errors.New("该域名已有续费请求处理中，请等待处理完成后再试")
+	}
+
 	years := in.Years
 	if !yearsOK(years) {
 		return nil, ErrYearsOutOfRange
@@ -134,6 +144,11 @@ func (p *Plugin) renewInternal(ctx context.Context, c *Client, in renewInput) (*
 		return nil, errors.New("事务提交失败: " + err.Error())
 	}
 
+	// 钱已扣：此后所有路径（上游调用/退款/落库）必须脱离请求 ctx——
+	// 客户端断开会取消 r.Context()，退款若随 ctx 失败，订单将滞留 paid
+	// 且无 operation 行供 cron 补救，形成资金悬挂。
+	ctx = context.WithoutCancel(ctx)
+
 	// 4. 上游续费（事务外）：失败 → 原子退款（先条件 UPDATE 认领订单，再回补余额）
 	opID, err := c.RenewDomain(ctx, d.Domain, years, expiry)
 	if err != nil {
@@ -141,10 +156,11 @@ func (p *Plugin) renewInternal(ctx context.Context, c *Client, in renewInput) (*
 		return nil, errors.New("Spaceship 续费失败: " + err.Error())
 	}
 
-	// 5. 操作记录落库；失败则退款（钱不能因本地故障而悬挂）
+	// 5. 操作记录落库；失败则退款（钱不能因本地故障而悬挂），上游已受理须留痕对账
 	tx2, err := p.host.DB.BeginTx(ctx, nil)
 	if err != nil {
 		p.refundOrderPaid(ctx, order, "renew")
+		p.reportOrphanUpstream(ctx, order, opID, "renew", "事务开启失败")
 		return nil, errors.New("事务开启失败: " + err.Error())
 	}
 	if _, err := txRepo.WithTx(tx2).CreateOperation(ctx, &OperationRow{
@@ -157,10 +173,12 @@ func (p *Plugin) renewInternal(ctx context.Context, c *Client, in renewInput) (*
 	}); err != nil {
 		_ = tx2.Rollback()
 		p.refundOrderPaid(ctx, order, "renew")
+		p.reportOrphanUpstream(ctx, order, opID, "renew", err.Error())
 		return nil, errors.New("操作记录落库失败（已退款）: " + err.Error())
 	}
 	if err := tx2.Commit(); err != nil {
 		p.refundOrderPaid(ctx, order, "renew")
+		p.reportOrphanUpstream(ctx, order, opID, "renew", "事务提交失败")
 		return nil, errors.New("事务提交失败（已退款）: " + err.Error())
 	}
 	return &renewResult{
@@ -204,7 +222,15 @@ func (p *Plugin) refundOrderPaid(ctx context.Context, o *OrderRow, kind string) 
 	note := fmt.Sprintf("%s失败自动退款 %s", map[string]string{"register": "域名注册", "renew": "域名续费"}[kind], o.Domain)
 	bal := repo.NewBalance(p.host.DB)
 	if err := bal.AdminAdjust(ctx, o.UserID, amount, note); err != nil {
+		// 订单已标 refunded 但余额未回补：留日志 + 告警管理员人工补退（按订单+日去重）。
 		log.Printf("[spaceship] 订单 %d 已标记退款但余额回补失败（需人工对账）: %v", o.ID, err)
+		if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
+			alertKey := fmt.Sprintf("spaceship.refund.adjust:%d:%s", o.ID, time.Now().Format("2006-01-02"))
+			_ = p.host.Notify.NotifyAdminOnce(ctx, alertKey, alertCategorySpaceshipPoll,
+				"自动退款回补失败",
+				fmt.Sprintf("订单 %d（%s，用户 %d，%s 元）已标记退款但余额回补失败: %v。请人工补退。",
+					o.ID, o.Domain, o.UserID, amount, err))
+		}
 		return
 	}
 	if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
@@ -228,6 +254,24 @@ func (p *Plugin) refundByDomainOperation(ctx context.Context, op *OperationRow) 
 		return
 	}
 	p.refundOrderPaid(ctx, o, kind)
+}
+
+// reportOrphanUpstream 上游已受理但本地落库失败且已退款：把 opID 写入订单备注留痕，
+// 并按操作+日去重告警管理员对账（否则上游异步结果彻底失联）。
+func (p *Plugin) reportOrphanUpstream(ctx context.Context, o *OrderRow, opID, kind, cause string) {
+	if o == nil || o.ID <= 0 || opID == "" {
+		return
+	}
+	kindName := map[string]string{"register": "域名注册", "renew": "域名续费"}[kind]
+	_ = p.repo.SetOrderNote(ctx, o.ID,
+		fmt.Sprintf("%s失败自动退款 %s（上游已受理 opID=%s，本地落库失败: %s，需对账）", kindName, o.Domain, opID, cause))
+	if p.cfgBool(ctx, "enableNotify", true) && p.host.Notify != nil {
+		alertKey := fmt.Sprintf("spaceship.orphan:%s:%s", opID, time.Now().Format("2006-01-02"))
+		_ = p.host.Notify.NotifyAdminOnce(ctx, alertKey, alertCategorySpaceshipPoll,
+			"上游已受理但本地落库失败",
+			fmt.Sprintf("域名 %s %s上游已受理（操作 %s）但本地落库失败（%s），款项已自动退款，请对账上游状态。",
+				o.Domain, kindName, opID, cause))
+	}
 }
 
 func kindTitle(kind string) string {
