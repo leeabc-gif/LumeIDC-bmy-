@@ -186,7 +186,8 @@ const registerAmountText = computed(() => {
 let quoteSeq = 0
 
 // 弹窗关闭即作废 in-flight 询价：关闭动作会先触发域名输入框 blur（此时弹窗仍
-// visible，入口守卫拦不住），故在关闭后递增序号作废该请求，避免向上游白耗一次配额
+// visible），配合 quoteRegister 发请求前的跨拍守卫，关闭场景不再发出上游调用；
+// 已发出的请求在此作废响应写入，防关闭后残留询价状态/误弹提示
 watch(registerDialogVisible, (v) => {
   if (!v) {
     quoteSeq++
@@ -205,10 +206,16 @@ async function quoteRegister() {
   const seq = ++quoteSeq
   registerChecking.value = true
   try {
+    // 延迟一个宏任务再发请求：点击「取消/X」关闭弹窗时 blur 先于 click（关闭落库）
+    // 发生，同一拍内弹窗仍 visible；跨过宏任务边界后关闭状态已落，可直接省掉该次调用
+    await new Promise((r) => setTimeout(r, 0))
+    if (seq !== quoteSeq || !registerDialogVisible.value || registerForm.domain.trim().toLowerCase() !== domain) {
+      return
+    }
     const res = await http.post<{ ok: number; msg?: string; item?: CheckItem }>('/plugin/spaceship/check', {
       domain,
     })
-    // 竞态守卫：更新的询价已发起、域名已变/被重置、或弹窗已关闭（关闭会触发 blur）→ 丢弃过期响应
+    // 竞态守卫：更新的询价已发起、域名已变/被重置、或弹窗已关闭 → 丢弃过期响应
     if (seq !== quoteSeq || !registerDialogVisible.value || registerForm.domain.trim().toLowerCase() !== domain) return
     if (String(res.ok) !== '1' || !res.item) {
       registerQuote.value = null
