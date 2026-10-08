@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onMounted, reactive, ref } from 'vue'
+import { computed, h, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox, ElButton, ElTag } from 'element-plus'
 import type { ColumnOption } from '@/types'
 import ArtStatsCard from '@/components/core/cards/art-stats-card/index.vue'
@@ -184,6 +184,16 @@ const registerAmountText = computed(() => {
 
 // 询价序号：并发/重复触发时旧响应一律作废（守卫结果写入与 loading 归零）
 let quoteSeq = 0
+
+// 弹窗关闭即作废 in-flight 询价：关闭动作会先触发域名输入框 blur（此时弹窗仍
+// visible，入口守卫拦不住），故在关闭后递增序号作废该请求，避免向上游白耗一次配额
+watch(registerDialogVisible, (v) => {
+  if (!v) {
+    quoteSeq++
+    registerChecking.value = false
+    registerQuote.value = null
+  }
+})
 
 // 按当前域名向服务端询价（后台价目表 + SpaceShip 溢价标记）
 async function quoteRegister() {
